@@ -32,10 +32,51 @@ except ModuleNotFoundError:
     sys.exit("缺少 duckdb，請先執行：pip install duckdb")
 
 
-# 資料放在這個 repo 外面（見 README）。預設往上一層找 data/，
-# 也就是 DSO585/data/。如果你的資料放在別的地方，設環境變數覆寫：
-#     export DSO585_DATA=/your/path/to/data
-DATA_DIR = Path(os.environ.get("DSO585_DATA", Path(__file__).parent.parent / "data"))
+# 資料不在這個 repo 裡（太大，而且 Kaggle 授權不允許散布）。
+# 程式會依序找這幾個地方，找到就用，所以多數情況你什麼都不用設定：
+#   1. 環境變數 DSO585_DATA 指定的路徑
+#   2. 這個 repo 裡面的 data/
+#   3. 這個 repo 旁邊的 data/（也就是往上一層）
+HERE = Path(__file__).resolve().parent
+DATA_CANDIDATES = [
+    Path(os.environ["DSO585_DATA"]) if os.environ.get("DSO585_DATA") else None,
+    HERE / "data",
+    HERE.parent / "data",
+]
+
+
+def find_data_dir() -> Path:
+    """回傳第一個看起來真的放著資料的目錄。都找不到就給出清楚的說明。"""
+    # 使用者明確設了環境變數卻找不到資料，就直接報錯。
+    # 不能默默改用其他目錄，否則他會以為在用 A 的資料，其實用的是 B。
+    env = os.environ.get("DSO585_DATA")
+    if env:
+        if (Path(env) / "articles.csv").exists():
+            return Path(env)
+        sys.exit(
+            f"環境變數 DSO585_DATA 指向 {env}\n"
+            "但那裡找不到 articles.csv。請確認路徑，或取消設定：\n"
+            "    unset DSO585_DATA"
+        )
+
+    for cand in DATA_CANDIDATES:
+        if cand and (cand / "articles.csv").exists():
+            return cand
+    # 找不到資料時，把找過的地方全部列出來，比只說「找不到」好用得多
+    looked = "\n".join(f"    {c}" for c in DATA_CANDIDATES if c)
+    sys.exit(
+        "找不到資料。我找過這些地方：\n"
+        f"{looked}\n\n"
+        "請到 Kaggle 下載這三個檔案，放進上面任一個資料夾：\n"
+        "    articles.csv / customers.csv / transactions_train.csv\n"
+        "    https://www.kaggle.com/competitions/"
+        "h-and-m-personalized-fashion-recommendations/data\n\n"
+        "如果資料放在別的地方，用環境變數告訴程式：\n"
+        "    export DSO585_DATA=/你的/資料/路徑"
+    )
+
+
+DATA_DIR = find_data_dir()
 PARQUET_DIR = DATA_DIR / "parquet"
 
 # 三份來源檔，以及必須強制指定型別的欄位。
@@ -69,7 +110,7 @@ def build_parquet(con: duckdb.DuckDBPyConnection, rebuild: bool = False) -> None
         pq_path = PARQUET_DIR / f"{name}.parquet"
 
         if not csv_path.exists():
-            sys.exit(f"找不到 {csv_path}，請先把 Kaggle 資料放進 data/")
+            sys.exit(f"資料目錄是 {DATA_DIR}，但裡面缺少 {name}.csv")
 
         if pq_path.exists() and not rebuild:
             print(f"  跳過 {name}.parquet（已存在，{pq_path.stat().st_size / 1e6:.0f} MB）")
@@ -253,6 +294,7 @@ def main() -> None:
 
     con = duckdb.connect()  # 記憶體內連線，不落地資料庫檔
 
+    print(f"資料目錄：{DATA_DIR}")
     if not from_csv:
         print("[1/2] 準備 Parquet")
         build_parquet(con, rebuild=rebuild)

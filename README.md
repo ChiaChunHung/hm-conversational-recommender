@@ -17,28 +17,36 @@ pip install duckdb
 **資料不在這個 repo 裡。** 原始檔有 3.2 GB，超過 GitHub 單檔 100 MB 的上限，
 而且 Kaggle 競賽資料僅授權學術與競賽用途，不可公開散布。請自行下載。
 
-1. 到 <https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations/data> 下載這三個檔案：
-   - `articles.csv`（約 36 MB）
-   - `customers.csv`（約 207 MB）
-   - `transactions_train.csv`（約 3.5 GB）
-2. 放到 repo 外層的 `data/` 資料夾，也就是這個結構：
+到 <https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations/data>
+下載這三個檔案：`articles.csv`、`customers.csv`、`transactions_train.csv`（共約 3.7 GB）。
 
-   ```
-   DSO585/
-   ├── data/                  ← 資料放這裡（不進版控）
-   │   ├── articles.csv
-   │   ├── customers.csv
-   │   └── transactions_train.csv
-   └── code/                  ← 這個 repo
-       ├── main.py
-       └── README.md
-   ```
+程式啟動時會依序找這三個地方，找到就用：
 
-3. 如果你想把資料放在別的地方，設環境變數即可：
+| 順序 | 位置 | 什麼時候會用到 |
+|---|---|---|
+| 1 | 環境變數 `DSO585_DATA` 指定的路徑 | 資料放在外接硬碟或其他專案共用時 |
+| 2 | 這個 repo 裡的 `data/` | 最單純，clone 完直接在裡面建一個 `data/` 丟進去 |
+| 3 | 這個 repo 旁邊的 `data/` | repo 只是某個大資料夾底下的一部分時 |
 
-   ```bash
-   export DSO585_DATA=/your/path/to/data
-   ```
+所以最省事的做法是在 clone 下來的資料夾裡建 `data/`，把三個 CSV 丟進去，什麼都不用設定：
+
+```
+dso585-hm-crs/
+├── data/                  ← 在這裡建，丟三個 CSV 進去（不進版控）
+├── main.py
+└── README.md
+```
+
+如果資料放在別的地方，執行前設一次環境變數：
+
+```bash
+export DSO585_DATA=/Volumes/外接硬碟/hm_data
+python main.py
+```
+
+想每次開終端機都自動生效，就把那行 `export` 加到 `~/.zshrc`（macOS 預設）或 `~/.bashrc`。
+
+程式每次啟動都會印出它實際使用的資料目錄，所以不會搞錯用到哪一份。
 
 ## 執行
 
