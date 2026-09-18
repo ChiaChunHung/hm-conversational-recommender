@@ -14,39 +14,50 @@ pip install duckdb
 
 ## 資料準備
 
-**資料不在這個 repo 裡。** 原始檔有 3.2 GB，超過 GitHub 單檔 100 MB 的上限，
-而且 Kaggle 競賽資料僅授權學術與競賽用途，不可公開散布。請自行下載。
+**資料不放在這個 repo 裡，要放在 repo 的外面。** 原始檔 3.7 GB，超過 GitHub 單檔
+100 MB 的上限，而且 Kaggle 競賽資料僅授權學術與競賽用途，不可公開散布。
 
 到 <https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations/data>
-下載這三個檔案：`articles.csv`、`customers.csv`、`transactions_train.csv`（共約 3.7 GB）。
-
-程式啟動時會依序找這三個地方，找到就用：
-
-| 順序 | 位置 | 什麼時候會用到 |
-|---|---|---|
-| 1 | 環境變數 `DSO585_DATA` 指定的路徑 | 資料放在外接硬碟或其他專案共用時 |
-| 2 | 這個 repo 裡的 `data/` | 最單純，clone 完直接在裡面建一個 `data/` 丟進去 |
-| 3 | 這個 repo 旁邊的 `data/` | repo 只是某個大資料夾底下的一部分時 |
-
-所以最省事的做法是在 clone 下來的資料夾裡建 `data/`，把三個 CSV 丟進去，什麼都不用設定：
+下載 `articles.csv`、`customers.csv`、`transactions_train.csv`，然後照這個結構擺：
 
 ```
-dso585-hm-crs/
-├── data/                  ← 在這裡建，丟三個 CSV 進去（不進版控）
-├── main.py
-└── README.md
+DSO585/                    ← 隨便你取什麼名字，用來裝下面兩個資料夾
+├── data/                  ← 資料放這裡，與 repo 並排
+│   ├── articles.csv
+│   ├── customers.csv
+│   └── transactions_train.csv
+└── dso585-hm-crs/         ← clone 下來的 repo
+    ├── main.py
+    └── README.md
 ```
 
-如果資料放在別的地方，執行前設一次環境變數：
+也就是先建一個外層資料夾，在裡面 clone，再於旁邊建 `data/`：
+
+```bash
+mkdir DSO585 && cd DSO585
+git clone https://github.com/<帳號>/dso585-hm-crs.git
+mkdir data          # 三個 CSV 放這裡
+```
+
+### 為什麼一定要放在外面
+
+放在 repo 外面，git 物理上看不到它，**不可能**誤傳。放在裡面就只能靠 `.gitignore`
+擋，而且 `git clean -xdf`（很常見的「清乾淨重來」指令）會刪掉所有被 ignore 的檔案，
+一個指令就讓 3.7 GB 資料蒸發，得重載一次。
+
+程式偵測到資料被放在 repo 裡面時會直接停下來，並告訴你搬移指令。
+
+### 資料放在別的地方
+
+例如外接硬碟。執行前設一次環境變數即可：
 
 ```bash
 export DSO585_DATA=/Volumes/外接硬碟/hm_data
 python main.py
 ```
 
-想每次開終端機都自動生效，就把那行 `export` 加到 `~/.zshrc`（macOS 預設）或 `~/.bashrc`。
-
-程式每次啟動都會印出它實際使用的資料目錄，所以不會搞錯用到哪一份。
+想每次開終端機都生效，把那行 `export` 加進 `~/.zshrc`（macOS 預設）或 `~/.bashrc`。
+程式每次啟動都會印出實際使用的資料目錄，不會搞錯用到哪一份。
 
 ## 執行
 

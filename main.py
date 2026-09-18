@@ -32,15 +32,18 @@ except ModuleNotFoundError:
     sys.exit("缺少 duckdb，請先執行：pip install duckdb")
 
 
-# 資料不在這個 repo 裡（太大，而且 Kaggle 授權不允許散布）。
-# 程式會依序找這幾個地方，找到就用，所以多數情況你什麼都不用設定：
+# 資料一律放在這個 repo 的「外面」，也就是與 repo 並排的 data/。
+#
+# 為什麼不放 repo 裡面：放外面的話，git 物理上看不到它，不可能誤 commit。
+# 放裡面就只能靠 .gitignore 擋，而且 git clean -xdf 會把被 ignore 的檔案
+# 全部刪掉，一個指令就讓 4 GB 資料蒸發。
+#
+# 搜尋順序：
 #   1. 環境變數 DSO585_DATA 指定的路徑
-#   2. 這個 repo 裡面的 data/
-#   3. 這個 repo 旁邊的 data/（也就是往上一層）
+#   2. 這個 repo 旁邊的 data/
 HERE = Path(__file__).resolve().parent
 DATA_CANDIDATES = [
     Path(os.environ["DSO585_DATA"]) if os.environ.get("DSO585_DATA") else None,
-    HERE / "data",
     HERE.parent / "data",
 ]
 
@@ -57,6 +60,17 @@ def find_data_dir() -> Path:
             f"環境變數 DSO585_DATA 指向 {env}\n"
             "但那裡找不到 articles.csv。請確認路徑，或取消設定：\n"
             "    unset DSO585_DATA"
+        )
+
+    # 放在 repo 裡面是常見的誤會，特別提醒而不是讓他一頭霧水
+    inside = HERE / "data"
+    if (inside / "articles.csv").exists():
+        sys.exit(
+            f"資料放在 repo 裡面了：{inside}\n\n"
+            "請把它移到 repo 的外面，與 repo 並排：\n"
+            f"    mv {inside} {HERE.parent / 'data'}\n\n"
+            "原因：放外面 git 就看不到它，不可能誤傳；放裡面只能靠 .gitignore 擋，\n"
+            "而且 git clean -xdf 會把 .gitignore 忽略的檔案全部刪掉，資料會整包消失。"
         )
 
     for cand in DATA_CANDIDATES:
