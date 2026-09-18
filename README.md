@@ -30,10 +30,13 @@ DSO585/                 ← 外層資料夾，名字隨意
 
 ```bash
 mkdir DSO585 && cd DSO585
-git clone https://github.com/<帳號>/<repo>.git
+git clone git@github.com:ChiaChunHung/hm-conversational-recommender.git
 mkdir data          # 三個 CSV 放進這裡
-cd <repo> && python main.py
+cd hm-conversational-recommender && python main.py
 ```
+
+這是 private repo，要先被加為 collaborator 才能 clone。網址是 SSH 格式，
+需要先把你的公鑰加到 GitHub（`ssh -T git@github.com` 回覆 Hi 你的帳號就是設好了）。
 
 ### 為什麼一定要放在外面
 
@@ -49,8 +52,9 @@ cd <repo> && python main.py
 python main.py
 ```
 
-第一次執行會把三份 CSV 轉成 Parquet（存在 `data/parquet/`，約 10 秒），
-之後每次執行都會直接用 Parquet，速度約快三倍。轉出來的檔案不進版控，刪掉重跑即可。
+第一次執行會把三份 CSV 轉成 Parquet，存在 `data/parquet/`，轉檔本身約 2 秒，
+首次執行連同統計約 6 秒。之後每次執行都直接用 Parquet，統計從 12.5 秒降到 4 秒。
+轉出來的檔案不進版控，刪掉重跑即可。
 
 | 指令 | 作用 |
 |---|---|
@@ -64,7 +68,7 @@ python main.py
 
 我們做的都是「掃過三千萬筆算統計」這類分析型查詢，那是欄式資料庫的強項；
 SQLite 是列式儲存，為「抓出或更新單筆」設計。而且 DuckDB 可以直接對 CSV / Parquet
-下 SQL，不需要先把資料匯入，省掉一個在 3.2 GB 規模下會爆記憶體的步驟。
+下 SQL，不需要先把資料匯入，省掉一個在 3.5 GB 規模下會爆記憶體的步驟。
 
 ## 注意事項
 
