@@ -21,22 +21,18 @@ pip install duckdb
 下載 `articles.csv`、`customers.csv`、`transactions_train.csv`，然後照這個結構擺：
 
 ```
-DSO585/                    ← 隨便你取什麼名字，用來裝下面兩個資料夾
-├── data/                  ← 資料放這裡，與 repo 並排
-│   ├── articles.csv
-│   ├── customers.csv
-│   └── transactions_train.csv
-└── dso585-hm-crs/         ← clone 下來的 repo
-    ├── main.py
-    └── README.md
+DSO585/                 ← 外層資料夾，名字隨意
+├── data/               ← 三個 CSV 放這裡，與 repo 並排
+└── <clone 下來的 repo>/ ← main.py 在這裡
 ```
 
-也就是先建一個外層資料夾，在裡面 clone，再於旁邊建 `data/`：
+指令大致如下：
 
 ```bash
 mkdir DSO585 && cd DSO585
-git clone https://github.com/<帳號>/dso585-hm-crs.git
-mkdir data          # 三個 CSV 放這裡
+git clone https://github.com/<帳號>/<repo>.git
+mkdir data          # 三個 CSV 放進這裡
+cd <repo> && python main.py
 ```
 
 ### 為什麼一定要放在外面
@@ -45,19 +41,7 @@ mkdir data          # 三個 CSV 放這裡
 擋，而且 `git clean -xdf`（很常見的「清乾淨重來」指令）會刪掉所有被 ignore 的檔案，
 一個指令就讓 3.7 GB 資料蒸發，得重載一次。
 
-程式偵測到資料被放在 repo 裡面時會直接停下來，並告訴你搬移指令。
-
-### 資料放在別的地方
-
-例如外接硬碟。執行前設一次環境變數即可：
-
-```bash
-export DSO585_DATA=/Volumes/外接硬碟/hm_data
-python main.py
-```
-
-想每次開終端機都生效，把那行 `export` 加進 `~/.zshrc`（macOS 預設）或 `~/.bashrc`。
-程式每次啟動都會印出實際使用的資料目錄，不會搞錯用到哪一份。
+程式會在啟動時檢查，資料缺檔或放錯位置都會直接停下來並告訴你怎麼修。
 
 ## 執行
 

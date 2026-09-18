@@ -21,7 +21,6 @@ H&M 對話式推薦系統 — 資料管線與探索統計
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path
@@ -36,31 +35,21 @@ except ModuleNotFoundError:
 #
 # 為什麼不放 repo 裡面：放外面的話，git 物理上看不到它，不可能誤 commit。
 # 放裡面就只能靠 .gitignore 擋，而且 git clean -xdf 會把被 ignore 的檔案
-# 全部刪掉，一個指令就讓 4 GB 資料蒸發。
-#
-# 搜尋順序：
-#   1. 環境變數 DSO585_DATA 指定的路徑
-#   2. 這個 repo 旁邊的 data/
+# 全部刪掉，一個指令就讓 3.7 GB 資料蒸發。
 HERE = Path(__file__).resolve().parent
-DATA_CANDIDATES = [
-    Path(os.environ["DSO585_DATA"]) if os.environ.get("DSO585_DATA") else None,
-    HERE.parent / "data",
-]
+DATA_DIR = HERE.parent / "data"
 
 
-def find_data_dir() -> Path:
-    """回傳第一個看起來真的放著資料的目錄。都找不到就給出清楚的說明。"""
-    # 使用者明確設了環境變數卻找不到資料，就直接報錯。
-    # 不能默默改用其他目錄，否則他會以為在用 A 的資料，其實用的是 B。
-    env = os.environ.get("DSO585_DATA")
-    if env:
-        if (Path(env) / "articles.csv").exists():
-            return Path(env)
-        sys.exit(
-            f"環境變數 DSO585_DATA 指向 {env}\n"
-            "但那裡找不到 articles.csv。請確認路徑，或取消設定：\n"
-            "    unset DSO585_DATA"
-        )
+def check_data_dir() -> None:
+    """確認三份資料都在該在的位置，不在就說清楚該怎麼辦。"""
+    missing = [n for n in TABLES if not (DATA_DIR / f"{n}.csv").exists()]
+    if not missing:
+        return
+
+    # 目錄在、只是少幾個檔案，就直接點名少哪些
+    if len(missing) < len(TABLES):
+        listed = "\n".join(f"    {n}.csv" for n in missing)
+        sys.exit(f"資料目錄 {DATA_DIR} 缺少這些檔案：\n{listed}")
 
     # 放在 repo 裡面是常見的誤會，特別提醒而不是讓他一頭霧水
     inside = HERE / "data"
@@ -68,29 +57,20 @@ def find_data_dir() -> Path:
         sys.exit(
             f"資料放在 repo 裡面了：{inside}\n\n"
             "請把它移到 repo 的外面，與 repo 並排：\n"
-            f"    mv {inside} {HERE.parent / 'data'}\n\n"
+            f"    mv {inside} {DATA_DIR}\n\n"
             "原因：放外面 git 就看不到它，不可能誤傳；放裡面只能靠 .gitignore 擋，\n"
             "而且 git clean -xdf 會把 .gitignore 忽略的檔案全部刪掉，資料會整包消失。"
         )
 
-    for cand in DATA_CANDIDATES:
-        if cand and (cand / "articles.csv").exists():
-            return cand
-    # 找不到資料時，把找過的地方全部列出來，比只說「找不到」好用得多
-    looked = "\n".join(f"    {c}" for c in DATA_CANDIDATES if c)
     sys.exit(
-        "找不到資料。我找過這些地方：\n"
-        f"{looked}\n\n"
-        "請到 Kaggle 下載這三個檔案，放進上面任一個資料夾：\n"
+        f"找不到資料。應該放在：{DATA_DIR}\n\n"
+        "請到 Kaggle 下載這三個檔案放進去：\n"
         "    articles.csv / customers.csv / transactions_train.csv\n"
         "    https://www.kaggle.com/competitions/"
-        "h-and-m-personalized-fashion-recommendations/data\n\n"
-        "如果資料放在別的地方，用環境變數告訴程式：\n"
-        "    export DSO585_DATA=/你的/資料/路徑"
+        "h-and-m-personalized-fashion-recommendations/data"
     )
 
 
-DATA_DIR = find_data_dir()
 PARQUET_DIR = DATA_DIR / "parquet"
 
 # 三份來源檔，以及必須強制指定型別的欄位。
@@ -308,6 +288,7 @@ def main() -> None:
 
     con = duckdb.connect()  # 記憶體內連線，不落地資料庫檔
 
+    check_data_dir()
     print(f"資料目錄：{DATA_DIR}")
     if not from_csv:
         print("[1/2] 準備 Parquet")
