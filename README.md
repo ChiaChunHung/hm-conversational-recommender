@@ -8,9 +8,15 @@
 - Python 3.10 以上
 - 套件：`duckdb`
 
+裝在虛擬環境裡，不要裝到全域 Python：
+
 ```bash
-pip install duckdb
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
+
+之後每次開新的終端機，都要先 `source .venv/bin/activate` 才能跑 `main.py`。
 
 ## 資料準備
 
@@ -32,7 +38,10 @@ DSO585/                 ← 外層資料夾，名字隨意
 mkdir DSO585 && cd DSO585
 git clone git@github.com:ChiaChunHung/hm-conversational-recommender.git
 mkdir data          # 三個 CSV 放進這裡
-cd hm-conversational-recommender && python main.py
+cd hm-conversational-recommender
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
 這是 private repo，要先被加為 collaborator 才能 clone。網址是 SSH 格式，
@@ -47,6 +56,8 @@ cd hm-conversational-recommender && python main.py
 程式會在啟動時檢查，資料缺檔或放錯位置都會直接停下來並告訴你怎麼修。
 
 ## 執行
+
+先確認虛擬環境已啟用（提示字元開頭有 `(.venv)`），否則先執行 `source .venv/bin/activate`。
 
 ```bash
 python main.py
