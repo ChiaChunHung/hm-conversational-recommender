@@ -6,7 +6,7 @@
 ## 環境需求
 
 - Python 3.10 以上
-- 套件：`duckdb`
+- 套件：`duckdb`、`pandas`、`matplotlib`、`ipykernel`（見 `requirements.txt`）
 
 裝在虛擬環境裡，不要裝到全域 Python：
 
@@ -17,6 +17,7 @@ pip install -r requirements.txt
 ```
 
 之後每次開新的終端機，都要先 `source .venv/bin/activate` 才能跑 `main.py`。
+在 VS Code 裡開終端機會自動啟用，不用手動打。
 
 ## 資料準備
 
@@ -41,7 +42,7 @@ mkdir data          # 三個 CSV 放進這裡
 cd hm-conversational-recommender
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python main.py
+python main.py build
 ```
 
 這是 private repo，要先被加為 collaborator 才能 clone。網址是 SSH 格式，
@@ -55,23 +56,45 @@ python main.py
 
 程式會在啟動時檢查，資料缺檔或放錯位置都會直接停下來並告訴你怎麼修。
 
+## 程式結構
+
+| 檔案 | 作用 |
+|---|---|
+| `main.py` | 入口。只做命令列分派，實際工作在模組裡 |
+| `dataset.py` | 共用資料層：路徑、型別、時間邊界、DuckDB 連線 |
+| `prepare.py` | CSV → Parquet 轉檔 |
+| `eda.ipynb` | 資料探索：提案附錄 A 的 19 項統計 + 圖表 |
+
+之後新增的模組（召回、排序、評估）平行放在同一層，各自在 `main.py` 的
+`COMMANDS` 註冊一個指令。
+
 ## 執行
 
 先確認虛擬環境已啟用（提示字元開頭有 `(.venv)`），否則先執行 `source .venv/bin/activate`。
 
+### 轉檔
+
 ```bash
-python main.py
+python main.py build
 ```
 
-第一次執行會把三份 CSV 轉成 Parquet，存在 `data/parquet/`，轉檔本身約 2 秒，
-首次執行連同統計約 6 秒。之後每次執行都直接用 Parquet，統計從 12.5 秒降到 4 秒。
-轉出來的檔案不進版控，刪掉重跑即可。
+第一次執行會把三份 CSV 轉成 Parquet，存在 `data/parquet/`，約 2 秒。
+之後重跑會自動跳過已存在的檔案。轉出來的檔案不進版控，刪掉重跑即可。
 
 | 指令 | 作用 |
 |---|---|
-| `python main.py` | 需要時轉檔，然後輸出探索統計 |
-| `python main.py --rebuild` | 強制重新轉檔 |
-| `python main.py --from-csv` | 略過 Parquet 直接查 CSV（用來比較速度） |
+| `python main.py build` | 需要時轉檔 |
+| `python main.py build --rebuild` | 強制重新轉檔 |
+
+### 資料探索
+
+轉檔完成後開 `eda.ipynb`，Run All 即可。輸出包含可直接貼回提案附錄 A 的
+Markdown 表格，以及年齡分布、價格分布、月交易量、長尾集中度四張圖。
+
+首次開啟時 VS Code 右上角要選 `.venv` 的 Python 直譯器。
+
+所有聚合都在 SQL 裡完成，只把小結果交給 Python 畫圖 ——
+3178 萬筆明細若整包拉進 pandas 會吃掉約 6.2 GB。
 
 輸出是一張 Markdown 表格，19 項資料探索統計，可直接貼進報告。
 
