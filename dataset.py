@@ -96,9 +96,25 @@ LAST_4W_START = "2020-08-26"   # 最近四週
 # 熱銷榜往回取幾天。14 天是在驗證週上掃描 7/14/21/30/60/全部 之後選出來的，
 # 完全沒有用到保留週的分數 —— 推導過程見 eda.ipynb §4.2。
 POP_DAYS = 14
-POP_START = (dt.date.fromisoformat(HOLDOUT_START) - dt.timedelta(days=POP_DAYS)).isoformat()
 
 PRICE_SCALE = 590              # 還原近似價的倍率，見提案 2.1.2
+
+
+def pop_start_for(test_start: str, days: int = POP_DAYS) -> str:
+    """測試週開始前 days 天的起點。熱銷榜統計 [回傳值, test_start) 這一段。
+
+    為什麼要用函式算，不寫死一個日期：規則是「測試週開始前 14 天」，寫死就只對
+    某一週成立。拿保留週算出來的 2020-09-02 去測驗證週（09-09 開始），區間會從
+    14 天悄悄縮成 7 天，而且不會報錯 —— 你只會看到分數怪怪的。
+
+        pop_start_for(HOLDOUT_START)   '2020-09-02'   保留週前 14 天
+        pop_start_for(VAL_START)       '2020-08-26'   驗證週前 14 天
+    """
+    return (dt.date.fromisoformat(test_start) - dt.timedelta(days=days)).isoformat()
+
+
+# 保留週專用的那一個，先算好方便取用。其他週請改用 pop_start_for()。
+POP_START = pop_start_for(HOLDOUT_START)
 
 
 def check_data_dir() -> None:
