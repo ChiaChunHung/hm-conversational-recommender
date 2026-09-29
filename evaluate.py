@@ -5,8 +5,7 @@
 B0、B1、排序模型、加了對話的版本，都得用同一支函式打分才比得出高下。
 
     答案卷    truth_view()           (顧客, 品項) 相異組合 ← **唯一定義**，下面三支都讀它
-              truth_of()             同上，一位買家一列，不帶名字
-              truth_by_customer()    同上但鍵是 customer_id，逐顧客打 MAP 時用
+              truth_of()             同上，整理成一位買家一列
     答案紙    top_k()                全站熱銷前 12（B0 的輸出，也是補位用的清單）
               segment_top()          各分群的熱銷前 12（B1 的輸出）
               pad_to_k()             不足 12 件時拿上面那份清單補滿，跳過重複
@@ -65,7 +64,7 @@ def top_k(con: duckdb.DuckDBPyConnection, start: str, end: str, k: int = 12) -> 
 def truth_view(con: duckdb.DuckDBPyConnection, start: str, end: str) -> None:
     """建檢視表 truth：[start, end) 內相異的 (customer_id, article_id) 組合。
 
-    **答案卷的唯一定義。** 底下 truth_of / truth_by_customer / coverage 都讀這一張，
+    **答案卷的唯一定義。** 底下 truth_of / coverage / evaluate 都讀這一張，
     誰都不准自己再寫一段撈正解的 SQL。
 
     為什麼要這樣管：覆蓋率在召回層算、MAP 在這裡算，兩個分數都得拿同一張答案卷去對。
@@ -91,23 +90,6 @@ def truth_of(con: duckdb.DuckDBPyConnection, start: str, end: str) -> list[list[
     truth_view(con, start, end)
     return list(con.execute(
         "SELECT list(article_id) FROM truth GROUP BY customer_id").df().iloc[:, 0])
-
-
-def truth_by_customer(con: duckdb.DuckDBPyConnection, start: str,
-                      end: str) -> dict[str, set[str]]:
-    """同樣是答案卷，但鍵是 customer_id：{顧客: {他買過的品項}}。
-
-    用在**逐顧客打 MAP@12** —— ap_at_k() 要的是一個 Python set，
-    而那時候每人只剩 12 件，拉進記憶體很便宜。
-
-    覆蓋率不要用這支：那是 285 萬列候選對 21 萬組正解的比對，
-    留在 SQL 裡 join 只要零點幾秒，拉進 Python 做集合運算又慢又吃記憶體。
-    覆蓋率請用 coverage()。
-    """
-    truth_view(con, start, end)
-    df = con.execute(
-        "SELECT customer_id, list(article_id) AS truth FROM truth GROUP BY 1").df()
-    return {r.customer_id: set(r.truth) for r in df.itertuples()}
 
 
 def coverage(con: duckdb.DuckDBPyConnection, sources: list[str],
@@ -193,10 +175,10 @@ def evaluate(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
     b0 = top_k(con, pop_start, test_start)
     segs = segment_top(con, pop_start, test_start)
 
-    gt = con.execute(f"""
-        SELECT s.ageband, s.ig, list(DISTINCT t.article_id) AS truth
-        FROM tx t JOIN seg s USING (customer_id)
-        WHERE t.t_dat >= '{test_start}' AND t.t_dat < '{test_end}'
+    truth_view(con, test_start, test_end)
+    gt = con.execute("""
+        SELECT s.ageband, s.ig, list(t.article_id) AS truth
+        FROM truth t JOIN seg s USING (customer_id)
         GROUP BY t.customer_id, 1, 2
     """).df()
 
