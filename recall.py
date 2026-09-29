@@ -35,7 +35,7 @@
     候選來源            函式                狀態
     回購                repurchase()        ✓
     共購相似度          cooccurrence()      ✓
-    ALS 隱因子          尚未實作（要先 pip install implicit）
+    ALS 隱因子          als()               ✓（需要 implicit 套件）
     分群熱門            segment_popular()   ✓
     語意檢索            尚未實作（W8）
 
@@ -51,6 +51,7 @@ DuckDB 算不下會溢寫到 .tmp，pandas 不會，只會讓整台機器沒記�
 from __future__ import annotations
 
 import duckdb
+import pandas as pd
 
 import dataset
 
@@ -117,6 +118,23 @@ SEGMENT_TOP_N = 50
 # 「三源都指向它」和「只有分群熱門撈到」是不同的訊號。
 COOC_WEEKS = 12
 COOC_TOP_N = 10
+
+# ALS：看多久的互動、隱因子幾維、每人取幾個推薦。
+# 近 12 週是 350 萬筆互動、52 萬位顧客、41,585 件商品，稀疏矩陣約 28 MB。
+#
+# 驗證週掃過的設定（三源基準 12.5%、每人 149）：
+#
+#   設定                  單獨    合計    邊際
+#   factors=64 原始       2.6%   13.1%   +0.6pp / +25 候選
+#   factors=64 BM25       3.8%   13.2%   +0.8pp / +21 候選   ← 採用
+#   factors=128 BM25      4.2%   13.1%   +0.7pp / +19 候選
+#   factors=64 BM25 30輪  3.7%   13.2%   +0.7pp / +21 候選
+#
+# 加維度、加輪數都沒有讓邊際貢獻動 —— ALS 撈到的東西，前三源多半也撈得到。
+# 它是四源裡效率最差的（0.038%/候選，分群熱門是 0.116%）。
+ALS_WEEKS = 12
+ALS_FACTORS = 64
+ALS_TOP_N = 50
 
 
 def eval_customers(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str) -> int:
@@ -263,11 +281,100 @@ def cooccurrence(con: duckdb.DuckDBPyConnection, train_end: str,
     return con.execute("SELECT count(*) FROM cand_cooc").fetchone()[0]
 
 
+def als(con: duckdb.DuckDBPyConnection, train_end: str, top_n: int = ALS_TOP_N,
+        weeks: int = ALS_WEEKS, factors: int = ALS_FACTORS, seed: int = 42) -> int:
+    """建 cand_als：用矩陣分解找出「口味相近的人在買什麼」，每人取 top_n 件。
+
+    前三源都是規則：回購看他買過什麼、分群熱門看他那群在買什麼、共購看什麼跟什麼
+    一起賣。ALS 不是規則，它從「誰買過什麼」這張稀疏表裡自己學出隱藏的口味維度，
+    把每位顧客和每件商品都壓成一個 64 維向量，兩個向量相乘就是預測分數。
+    所以它撈得到的東西，前三源不見得撈得到。
+
+    只有隱性回饋：資料裡只有「買了」，沒有「不喜歡」。沒買過不等於不喜歡，
+    可能只是沒看過 —— 這就是 implicit 這個套件名字的由來，它的損失函數是為這種
+    資料設計的，不能拿評分預測那一套來套。
+
+    共識 §2 允許推薦顧客已買過的商品，所以 filter_already_liked_items=False。
+
+    seed 一定要固定。ALS 的因子是隨機初始化的，不固定的話同一份資料每次跑出不同的
+    候選池，你會分不出分數變動是模型改善還是雜訊（共識 §4）。
+
+    記憶體：只把整數索引拉進 Python，字串 ID 留在 DuckDB 最後再 join 回來。
+    近 12 週的稀疏矩陣約 28 MB。
+    """
+    try:
+        import numpy as np
+        import scipy.sparse as sp
+        from implicit.als import AlternatingLeastSquares
+        from implicit.nearest_neighbours import bm25_weight
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            f"ALS 需要 implicit 套件（缺少 {e.name}）。請執行：pip install -r requirements.txt"
+        ) from e
+
+    start = dataset.pop_start_for(train_end, weeks * 7)
+
+    # 先在 SQL 裡把字串 ID 換成連號整數 —— 稀疏矩陣只吃得下整數，
+    # 而且 64 字元的 customer_id 拉 350 萬筆進 Python 太浪費。
+    con.execute(f"""
+        CREATE OR REPLACE TABLE als_ix AS
+        WITH pair AS (
+            SELECT DISTINCT customer_id, article_id FROM tx
+            WHERE t_dat >= '{start}' AND t_dat < '{train_end}'
+        ),
+        u AS (SELECT customer_id, row_number() OVER (ORDER BY customer_id) - 1 AS ui
+              FROM (SELECT DISTINCT customer_id FROM pair)),
+        a AS (SELECT article_id, row_number() OVER (ORDER BY article_id) - 1 AS ai
+              FROM (SELECT DISTINCT article_id FROM pair))
+        SELECT p.customer_id, p.article_id, u.ui, a.ai
+        FROM pair p JOIN u USING (customer_id) JOIN a USING (article_id)
+    """)
+    ix = con.execute("SELECT ui, ai FROM als_ix").df()
+    n_u = int(ix["ui"].max()) + 1
+    n_a = int(ix["ai"].max()) + 1
+    mat = sp.csr_matrix(
+        (np.ones(len(ix), dtype="float32"), (ix["ui"].to_numpy(), ix["ai"].to_numpy())),
+        shape=(n_u, n_a),
+    )
+    del ix
+
+    # BM25 加權。不加權的話，買很多的人和熱門商品會主導整個矩陣，
+    # 學出來的因子等於在記熱銷榜 —— 而那件事分群熱門已經做了，重疊會更嚴重。
+    # 驗證週實測：不加權單獨 2.6%，加了 3.8%。
+    mat = bm25_weight(mat, K1=100, B=0.8).tocsr()
+
+    model = AlternatingLeastSquares(factors=factors, random_state=seed)
+    model.fit(mat, show_progress=False)
+
+    # 只對要評估的顧客做推薦。他們之中有人在這段窗口沒有互動（新客），
+    # ALS 給不出東西，那些人靠其他源補。
+    users = con.execute("""
+        SELECT DISTINCT i.ui FROM als_ix i JOIN eval_cus e USING (customer_id) ORDER BY 1
+    """).df()["ui"].to_numpy()
+    ids, _ = model.recommend(users, mat[users], N=top_n, filter_already_liked_items=False)
+
+    rec = pd.DataFrame({
+        "ui": np.repeat(users, ids.shape[1]).astype("int32"),
+        "ai": ids.reshape(-1).astype("int32"),
+    })
+    con.register("als_rec", rec)
+    con.execute("""
+        CREATE OR REPLACE TABLE cand_als AS
+        SELECT DISTINCT u.customer_id, a.article_id
+        FROM als_rec r
+        JOIN (SELECT DISTINCT customer_id, ui FROM als_ix) u USING (ui)
+        JOIN (SELECT DISTINCT article_id, ai FROM als_ix) a USING (ai)
+    """)
+    con.unregister("als_rec")
+    return con.execute("SELECT count(*) FROM cand_als").fetchone()[0]
+
+
 # 每一源在最終候選池裡對應的欄位名。加新的一源就在這裡多一行，build() 不用改。
 SOURCES = {
     "cand_repurchase": "from_repurchase",
     "cand_segment": "from_segment",
     "cand_cooc": "from_cooc",
+    "cand_als": "from_als",
 }
 
 
@@ -306,6 +413,7 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
     repurchase(con, test_start)
     segment_popular(con, test_start)
     cooccurrence(con, test_start)
+    als(con, test_start)
 
     # 每一源先貼上自己的旗標，再用 GROUP BY 把同一個 (顧客, 商品) 併成一列。
     # 內層用 UNION ALL 而不是 UNION：反正外層要 GROUP BY，UNION 會多做一次無用的去重。
