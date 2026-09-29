@@ -6,8 +6,11 @@
 先粗篩再精排，是 Kaggle 獲獎方案與業界的共同做法（提案 §2.2.2）。
 
 召回的唯一職責是**不要漏掉正解**。排序模型再強，也救不回第一關就被丟掉的商品 ——
-所以這一層的指標是覆蓋率（coverage），不是準確率。W5 的驗收標準是保留週實際購買的
-品項有 30% 以上被召回。
+所以這一層的指標是覆蓋率，不是準確率。W5 的驗收標準是保留週實際購買的品項有
+30% 以上被召回。
+
+覆蓋率本身在 evaluate.coverage()，不在這裡：那是評估指標，而且它要拿答案卷去對，
+答案卷的定義只能有一份（evaluate.truth_view）。這個檔案只負責產候選。
 
     候選來源            函式                狀態
     回購                repurchase()        ✓
@@ -74,51 +77,3 @@ def repurchase(con: duckdb.DuckDBPyConnection, train_end: str,
         WHERE t.t_dat >= '{start}' AND t.t_dat < '{train_end}'
     """)
     return con.execute("SELECT count(*) FROM cand_repurchase").fetchone()[0]
-
-
-def coverage(con: duckdb.DuckDBPyConnection, sources: list[str],
-             test_start: str, test_end: str) -> dict:
-    """召回覆蓋率：[test_start, test_end) 真正買的東西，有多少被這些候選源撈到了。
-
-    sources 是表名清單，例如 ['cand_repurchase']；多個會先 UNION 去重。
-
-    回傳兩種覆蓋率，兩個都要看：
-
-      micro  命中的 (顧客, 品項) 組數 / 總正解組數。W5 的 30% 說的是這個。
-             買很多件的顧客在這個數字裡權重較大。
-      macro  每位顧客各自的覆蓋率再平均。每個人一票，看的是「一般顧客」的體驗。
-
-    兩者差很多，代表召回對重度買家和輕度買家的效果不一樣，值得往下查。
-
-    全部在 SQL 裡算完，只把幾個數字拉出來。
-    """
-    union = " UNION ".join(f"SELECT customer_id, article_id FROM {s}" for s in sources)
-    row = con.execute(f"""
-        WITH cand AS ({union}),
-             truth AS (
-                 SELECT DISTINCT customer_id, article_id FROM tx
-                 WHERE t_dat >= '{test_start}' AND t_dat < '{test_end}'
-             ),
-             hit AS (
-                 SELECT t.customer_id, t.article_id, c.article_id IS NOT NULL AS hit
-                 FROM truth t
-                 LEFT JOIN cand c
-                        ON c.customer_id = t.customer_id AND c.article_id = t.article_id
-             ),
-             per_cus AS (
-                 SELECT customer_id, avg(CASE WHEN hit THEN 1.0 ELSE 0.0 END) AS c
-                 FROM hit GROUP BY 1
-             )
-        -- 全部寫成純量子查詢。把 hit 和 per_cus 擺在同一個 FROM 會變成交叉連接，
-        -- 213,728 × 68,984 ＝ 147 億列。
-        SELECT (SELECT count(*) FROM hit)                      AS 正解組數,
-               (SELECT count(*) FROM hit WHERE hit)            AS 命中組數,
-               (SELECT avg(c) FROM per_cus)                    AS macro,
-               (SELECT count(*) FROM cand)                     AS 候選組數,
-               (SELECT count(DISTINCT customer_id) FROM cand)  AS 有候選的顧客數
-    """).fetchone()
-    n_truth, n_hit, macro, n_cand, n_cus = row
-    return {"正解組數": n_truth, "命中組數": n_hit,
-            "micro": n_hit / n_truth, "macro": macro,
-            "候選組數": n_cand, "有候選的顧客數": n_cus,
-            "平均每人候選數": n_cand / n_cus if n_cus else 0.0}
