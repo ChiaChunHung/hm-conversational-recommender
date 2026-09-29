@@ -22,24 +22,40 @@ git show ":$NAME" > "$STAGED" 2>/dev/null || exit 0
 
 diff -q "$STAGED" "$VAULT" >/dev/null 2>&1 && exit 0
 
+# 兩邊的修改時間，用來判斷哪一份是新的（BSD / GNU stat 都試）
+mtime() {
+    stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$1" 2>/dev/null \
+        || stat -c '%y' "$1" 2>/dev/null | cut -c1-16 \
+        || echo '(讀不到)'
+}
+
 cat >&2 <<MSG
 
 ✗ 提案的兩份複本不一致，commit 已擋下。
 
     vault 正本   proposals/$NAME
+                 最後修改 $(mtime "$VAULT")
     repo 複本    code/$NAME
+                 最後修改 $(mtime "$NAME")
 
   差異（前 10 行，< 是 repo、> 是 vault）：
 MSG
 diff "$STAGED" "$VAULT" | head -10 | sed 's/^/    /' >&2
 cat >&2 <<MSG
 
-  正本在 vault，所以通常是「vault 改了但忘了同步過來」。同步：
+  ─────────────────────────────────────────────────────────────
+  依「哪一份比較新」挑一組指令執行。cp 會無聲覆蓋目的地，挑錯會弄丟修改。
+
+  【A】vault 比較新（你剛在 Obsidian 改過）→ 同步到 repo：
 
       cp "$VAULT" .
       git add "$NAME"
 
-  反過來（repo 才是新的）就把 cp 的方向調過來。
+  【B】repo 比較新（你剛 git pull 收到組員的改動）→ 同步回 vault：
+
+      cp "$NAME" ../proposals/
+
+  ─────────────────────────────────────────────────────────────
   這次確定要略過檢查：git commit --no-verify
 
 MSG
