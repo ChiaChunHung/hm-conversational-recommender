@@ -1,0 +1,46 @@
+#!/bin/sh
+#
+# 擋下「提案兩份複本不一致」的 commit。
+#
+# 背景：提案的正本在 Obsidian vault 的 proposals/，那裡在 repo 外面，進不了版控。
+# repo 裡放的是複本。兩份不會自己同步，最容易發生的是「在 Obsidian 改完、忘了同步」，
+# 組員 pull 下來拿到舊版，照舊版做事。這個 hook 讓分歧在 commit 當下就被擋住。
+
+NAME='H&M 對話式推薦系統執行提案.md'
+VAULT="../proposals/$NAME"
+
+# 組員 clone 下來不會有 vault。沒有正本就沒得比，直接放行。
+[ -f "$VAULT" ] || exit 0
+
+# repo 裡還沒追蹤這個檔案就不檢查
+git ls-files --error-unmatch "$NAME" >/dev/null 2>&1 || exit 0
+
+# 取這次 commit 實際會存進去的內容（index 版本；沒 staged 就等同 HEAD）
+STAGED=$(mktemp) || exit 0
+trap 'rm -f "$STAGED"' EXIT
+git show ":$NAME" > "$STAGED" 2>/dev/null || exit 0
+
+diff -q "$STAGED" "$VAULT" >/dev/null 2>&1 && exit 0
+
+cat >&2 <<MSG
+
+✗ 提案的兩份複本不一致，commit 已擋下。
+
+    vault 正本   proposals/$NAME
+    repo 複本    code/$NAME
+
+  差異（前 10 行，< 是 repo、> 是 vault）：
+MSG
+diff "$STAGED" "$VAULT" | head -10 | sed 's/^/    /' >&2
+cat >&2 <<MSG
+
+  正本在 vault，所以通常是「vault 改了但忘了同步過來」。同步：
+
+      cp "$VAULT" .
+      git add "$NAME"
+
+  反過來（repo 才是新的）就把 cp 的方向調過來。
+  這次確定要略過檢查：git commit --no-verify
+
+MSG
+exit 1

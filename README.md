@@ -114,6 +114,24 @@ SQLite 是列式儲存，為「抓出或更新單筆」設計。而且 DuckDB �
   `customer_id` 同理。程式裡的 `TABLES` 常數就是在處理這件事。
 - API 金鑰一律放在 `.env`（已在 `.gitignore` 中排除），絕對不要寫進程式碼。
 
+## 第一次 clone 後要做的事
+
+除了建 venv、放資料之外，還要啟用 repo 內建的 git hook：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+**只需做一次，但每次重新 clone 都要再做。** git 不會自動套用 repo 裡的 hook —— 那是刻意的
+安全設計，否則光是 clone 別人的專案就會執行到裡面的腳本。
+
+目前只有一個 hook：`pre-commit` 會擋下「提案兩份複本不一致」的 commit。
+提案的正本在 vault 的 `proposals/`（在 repo 外面，進不了版控），repo 裡是複本；
+兩份不會自己同步，最容易發生的是在 Obsidian 改完忘了同步過來。
+沒有 vault 的人（例如只 clone repo 的組員）不受影響，hook 會自動略過。
+
+要單次略過檢查用 `git commit --no-verify`。
+
 ## 協作方式
 
 1. 開新分支再改：`git switch -c feature/你要做的事`
