@@ -4,9 +4,13 @@
 規格全部來自 eda.ipynb 的建模共識 §2，寫在這裡一份，所有模型共用同一把尺 ——
 B0、B1、排序模型、加了對話的版本，都得用同一支函式打分才比得出高下。
 
-    答案卷    truth_of()    每位顧客在某一週買過的相異品項
-    答案紙    長度 12、不得重複、不足以 B0 補滿（pad_to_k）
-    打分      ap_at_k()     分母 min(正解數, 12)，與 Kaggle 一致
+    答案卷    truth_of()             每位買家在某一週買過的相異品項，沒有名字
+              truth_by_customer()    同上但鍵是 customer_id ← 算召回覆蓋率要用這支
+    答案紙    top_k()                全站熱銷前 12（B0 的輸出，也是補位用的清單）
+              segment_top()          各分群的熱銷前 12（B1 的輸出）
+              pad_to_k()             不足 12 件時拿上面那份清單補滿，跳過重複
+    打分      ap_at_k()              單一顧客，分母 min(正解數, 12)，與 Kaggle 一致
+              evaluate()             跑完整個保留週，回傳 B0 / B1 的 MAP 與命中率
 
 所有需要查資料的函式，第一個參數都是 con。不從外面偷抓全域變數：
 函式簽名看得出它要什麼，放到哪個檔案都能跑。
@@ -107,6 +111,13 @@ def evaluate(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
 
     分群用 test_start 當訓練上界重建一次 —— 分群依據是交易歷史，
     把要評估的那一週算進去就等於先看答案。
+
+    pop_start 請一律用 dataset.pop_start_for(test_start) 算，不要填 dataset.POP_START：
+    那個常數是拿保留週算出來的，換成驗證週會讓熱銷區間從 14 天悄悄縮成 7 天，
+    而且不會報錯。
+
+        evaluate(con, HOLDOUT_START, HOLD_END, dataset.pop_start_for(HOLDOUT_START))
+        evaluate(con, VAL_START,     VAL_END,  dataset.pop_start_for(VAL_START))
     """
     dataset.build_segments(con, test_start)
 
