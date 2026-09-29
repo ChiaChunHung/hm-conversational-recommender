@@ -34,7 +34,7 @@
 
     候選來源            函式                狀態
     回購                repurchase()        ✓
-    共購相似度          尚未實作
+    共購相似度          cooccurrence()      ✓
     ALS 隱因子          尚未實作（要先 pip install implicit）
     分群熱門            segment_popular()   ✓
     語意檢索            尚未實作（W8）
@@ -90,6 +90,33 @@ REPURCHASE_WEEKS = 12
 # 結論：五源做完先看總覆蓋率，不到 30% 才考慮提 top_n；
 #       最終的 top_n 等排序模型出來後用驗證週的 MAP 決定，不是用覆蓋率。
 SEGMENT_TOP_N = 50
+
+# 共購統計看多久，以及每件商品保留幾個共購夥伴。weeks=12 與回購對齊。
+#
+# 在驗證週掃 top_n（合計 = 回購 12 週 + 分群 50 + 共購）：
+#
+#   top_n   這一源單獨   合計    每人候選數
+#      —         —      10.4%      98      （沒有共購）
+#      5       3.9%     11.5%     121
+#     10       5.6%     12.5%     149      ← 採用
+#     20       7.6%     13.9%     206
+#     50      11.4%     16.7%     369
+#
+# 注意單獨 5.6% 但只讓合計 +2.1 個百分點 —— 其中 3.5 個百分點跟前兩源重疊。
+# 合理：常被一起買的東西，本來就多半是熱銷品，分群熱門已經撈走了。
+#
+# 每多一個候選換到的覆蓋率，三源對比（驗證週）：
+#
+#   分群熱門 top_n=50     0.1160%   ← 效率最高
+#   回購 4 週             0.1261%   （但只到 3.8%，窗口一拉長效率就掉）
+#   回購 12 週            0.0842%
+#   共購 top_n=10         0.0410%   ← 效率最低
+#
+# 那為什麼還留著共購：它是唯一能推出「他沒買過、也不在他那群熱銷榜上」的商品的源。
+# 覆蓋率上重疊不代表沒價值 —— 排序模型會拿 from_cooc 這個旗標當特徵，
+# 「三源都指向它」和「只有分群熱門撈到」是不同的訊號。
+COOC_WEEKS = 12
+COOC_TOP_N = 10
 
 
 def eval_customers(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str) -> int:
@@ -186,10 +213,61 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
     return con.execute("SELECT count(*) FROM cand_segment").fetchone()[0]
 
 
+def cooccurrence(con: duckdb.DuckDBPyConnection, train_end: str,
+                 top_n: int = COOC_TOP_N, weeks: int = COOC_WEEKS) -> int:
+    """建 cand_cooc：顧客買過的每件商品，帶出最常跟它一起被買的 top_n 件。
+
+    「一起被買」的定義是**同一位顧客、同一天**算一籃。訓練期 900 萬籃，平均 3.1 件，
+    最大一籃 159 件。用同籃而不是「這個人買過的所有東西兩兩配對」，是因為後者會把
+    半年前買的襪子跟今天買的外套配成一對 —— 那不是「一起買」，只是「都買過」。
+
+    這一源補的是另外兩源都補不到的：回購只給得出他買過的東西，分群熱門給的是全群
+    一樣的榜單，兩者都無法從「他的個人品味」推到「他沒買過但可能喜歡」的商品。
+
+    weeks 同時決定兩件事：共購統計看多久，以及拿顧客哪一段的購買紀錄去查表。
+    top_n 是每件商品保留幾個共購夥伴，要在驗證週上掃描決定。
+
+    排序加了 j 決勝，同票時才不會每次跑出不同的夥伴清單（共識 §4）。
+    """
+    start = dataset.pop_start_for(train_end, weeks * 7)
+
+    # 先算商品對商品的共購次數。雙向存（i→j 和 j→i 各一列），查表時才不用管方向。
+    # 近 12 週是 1,031 萬列、0.3 秒；先用 sum(n*(n-1)/2) 估過才建，沒有盲目展開。
+    con.execute(f"""
+        CREATE OR REPLACE TABLE cooc AS
+        WITH basket AS (
+            SELECT DISTINCT customer_id, t_dat, article_id FROM tx
+            WHERE t_dat >= '{start}' AND t_dat < '{train_end}'
+        )
+        SELECT a.article_id AS i, b.article_id AS j, count(*) AS n
+        FROM basket a JOIN basket b USING (customer_id, t_dat)
+        WHERE a.article_id <> b.article_id
+        GROUP BY 1, 2
+    """)
+
+    # 每件商品只留最強的 top_n 個夥伴。不留的話平均每件有 255 個夥伴，候選池會炸。
+    con.execute(f"""
+        CREATE OR REPLACE TABLE cand_cooc AS
+        WITH top AS (
+            SELECT i, j FROM (
+                SELECT i, j, row_number() OVER (PARTITION BY i ORDER BY n DESC, j) AS rk
+                FROM cooc
+            ) WHERE rk <= {top_n}
+        )
+        SELECT DISTINCT t.customer_id, top.j AS article_id
+        FROM tx t
+        JOIN eval_cus USING (customer_id)
+        JOIN top ON top.i = t.article_id
+        WHERE t.t_dat >= '{start}' AND t.t_dat < '{train_end}'
+    """)
+    return con.execute("SELECT count(*) FROM cand_cooc").fetchone()[0]
+
+
 # 每一源在最終候選池裡對應的欄位名。加新的一源就在這裡多一行，build() 不用改。
 SOURCES = {
     "cand_repurchase": "from_repurchase",
     "cand_segment": "from_segment",
+    "cand_cooc": "from_cooc",
 }
 
 
@@ -227,6 +305,7 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
     eval_customers(con, test_start, test_end)
     repurchase(con, test_start)
     segment_popular(con, test_start)
+    cooccurrence(con, test_start)
 
     # 每一源先貼上自己的旗標，再用 GROUP BY 把同一個 (顧客, 商品) 併成一列。
     # 內層用 UNION ALL 而不是 UNION：反正外層要 GROUP BY，UNION 會多做一次無用的去重。
