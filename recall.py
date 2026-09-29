@@ -16,7 +16,7 @@
     回購                repurchase()        ✓
     共購相似度          尚未實作
     ALS 隱因子          尚未實作（要先 pip install implicit）
-    分群熱門            尚未實作（分群標籤用 dataset.build_segments）
+    分群熱門            segment_popular()   ✓
     語意檢索            尚未實作（W8）
 
 每一源各自建一張 cand_<名字> 表，欄位一律是 (customer_id, article_id)。
@@ -36,6 +36,20 @@ import dataset
 
 # 回購往回看幾週。提案 §2.2.2 寫的是 12 週。
 REPURCHASE_WEEKS = 12
+
+# 分群熱門每群取前幾名。在驗證週上掃過 12 / 30 / 50 / 100 / 200：
+#
+#     k     這一源單獨   加上回購   每人候選數
+#      12       2.0%       6.9%        60
+#      30       4.1%       8.8%        78
+#      50       5.8%      10.4%        98     ← 採用
+#     100       9.3%      13.7%       148
+#     200      15.0%      19.0%       247
+#
+# 覆蓋率隨 k 幾乎線性成長，這一源還沒飽和 —— 但候選池也跟著線性成長，
+# 排序模型要篩的東西變多、推論變慢。提案 §2.2.2 的預算是每人 50-100 件，
+# 50 剛好貼齊上限。要換取更高覆蓋率就得先放寬那個預算。
+SEGMENT_TOP_K = 50
 
 
 def eval_customers(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str) -> int:
@@ -85,3 +99,44 @@ def repurchase(con: duckdb.DuckDBPyConnection, train_end: str,
         WHERE t.t_dat >= '{start}' AND t.t_dat < '{train_end}'
     """)
     return con.execute("SELECT count(*) FROM cand_repurchase").fetchone()[0]
+
+
+def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
+                    k: int = SEGMENT_TOP_K,
+                    days: int = dataset.POP_DAYS) -> int:
+    """建 cand_segment：每位顧客拿自己那一群最近 days 天賣最好的前 k 名。
+
+    分群是 (年齡層 × 主要品牌線)，共 35 群，定義在 dataset.build_segments。
+    B1 基準線用的是同一組標籤 —— 兩邊若各分一次群，分數就不可比。
+
+    這一源專門補回購補不到的洞：回購只給得出「他買過的東西」，
+    新客與換口味的人身上是空的。分群熱門對誰都給得出東西。
+
+    k 要在驗證週上掃描決定，不要看保留週的覆蓋率挑 ——
+    那是拿測試集調參數（共識 §1）。
+
+    排序加了 article_id 決勝，否則同票時每次跑出來的前 k 名會不一樣（共識 §4）。
+    """
+    dataset.build_segments(con, train_end)
+    start = dataset.pop_start_for(train_end, days)
+    con.execute(f"""
+        CREATE OR REPLACE TABLE cand_segment AS
+        WITH pop AS (
+            SELECT s.ageband, s.ig, t.article_id, count(*) AS n
+            FROM tx t JOIN seg s USING (customer_id)
+            WHERE t.t_dat >= '{start}' AND t.t_dat < '{train_end}'
+            GROUP BY 1, 2, 3
+        ),
+        ranked AS (
+            SELECT ageband, ig, article_id,
+                   row_number() OVER (PARTITION BY ageband, ig
+                                      ORDER BY n DESC, article_id) AS rk
+            FROM pop
+        )
+        SELECT e.customer_id, r.article_id
+        FROM eval_cus e
+        JOIN seg s USING (customer_id)
+        JOIN ranked r ON r.ageband = s.ageband AND r.ig = s.ig
+        WHERE r.rk <= {k}
+    """)
+    return con.execute("SELECT count(*) FROM cand_segment").fetchone()[0]
