@@ -167,7 +167,8 @@ SOURCES = {
 }
 
 
-def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str) -> int:
+def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
+          save: bool = False) -> int:
     """跑完所有召回源，合成最終候選池 cand。這是這個檔案的成品。
 
     cand 一列一個 (顧客, 商品)，每一源各一個 0/1 欄位標記它有沒有撈到這件：
@@ -183,6 +184,15 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str) -> int
 
     test_start 同時是「訓練資料的上界」和「要評估的那一週的第一天」。
     所有召回源都只讀它以前的交易；test_end 只用來決定要幫誰做推薦。
+
+    save=True 會順便把 cand 寫成 data/candidates/cand_<test_start>.parquet。
+
+    為什麼要存檔：W6 的排序模型要用好幾個週次的候選池訓練（提案 §2.2.2 的多 fold），
+    每次訓練都重算一遍太浪費；更重要的是**記憶體裡的東西沒有身分** ——
+    今天用 k=50 算一份、明天用 k=100 算一份，事後你分不出模型 A 是拿哪一份訓練的。
+    存成檔案才追得回來。
+
+    預設不存，因為量覆蓋率一天要跑好幾次，每次都寫 176 MB 沒意義。
     """
     eval_customers(con, test_start, test_end)
     repurchase(con, test_start)
@@ -203,4 +213,9 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str) -> int
         FROM ({" UNION ALL ".join(parts)})
         GROUP BY 1, 2
     """)
+    if save:
+        dataset.CAND_DIR.mkdir(parents=True, exist_ok=True)
+        f = dataset.CAND_DIR / f"cand_{test_start}.parquet"
+        con.execute(f"COPY cand TO '{f}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+
     return con.execute("SELECT count(*) FROM cand").fetchone()[0]

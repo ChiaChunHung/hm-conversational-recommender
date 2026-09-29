@@ -15,7 +15,7 @@
        (年齡層, 主要品牌線)。B1 基準線與召回的「分群熱門」共用這一組標籤。
 
   2. 「資料的規格是什麼？」
-     → 路徑在哪（DATA_DIR / PARQUET_DIR）、欄位什麼型別（TABLES）、
+     → 路徑在哪（DATA_DIR / PARQUET_DIR / CAND_DIR）、欄位什麼型別（TABLES）、
        時間怎麼切（FIRST_DAY / VAL_START / VAL_END / HOLDOUT_START / HOLD_END / LAST_DAY）、
        熱銷榜往回幾天（POP_DAYS / POP_START）、價格倍率多少（PRICE_SCALE）。
 
@@ -59,6 +59,7 @@ except ModuleNotFoundError:
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE.parent / "data"
 PARQUET_DIR = DATA_DIR / "parquet"
+CAND_DIR = DATA_DIR / "candidates"   # 召回產出的候選池，一週一個檔
 
 # 三份來源檔，以及必須強制指定型別的欄位。
 #
