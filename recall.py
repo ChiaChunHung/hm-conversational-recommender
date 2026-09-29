@@ -61,7 +61,7 @@ REPURCHASE_WEEKS = 12
 #
 # 在驗證週上掃過 12 / 30 / 50 / 100 / 200（不看保留週，看了就是拿測試集調參）：
 #
-#     k     這一源單獨   加上回購   每人候選數   每多一個候選換到的覆蓋率
+#   top_n   這一源單獨   加上回購   每人候選數   每多一個候選換到的覆蓋率
 #      12       2.0%       6.9%         60
 #      30       4.1%       8.8%         78            0.107%
 #      50       5.8%      10.4%         98            0.081%     ← 目前採用
@@ -70,23 +70,25 @@ REPURCHASE_WEEKS = 12
 #
 # 為什麼選 50，而不是覆蓋率最高的 200：
 #
+# （這個 top_n 是「每群撈幾件當候選」，跟 evaluate.py 的 k=12「最終推薦幾件」無關）
+#
 # 1. 只看覆蓋率的話，答案永遠是「k 越大越好」，這個問題問不出停損點。
-#    我們真正要最大化的是 MAP@12。k 拉大等於要排序模型從 247 件裡挑 12 件，
+#    我們真正要最大化的是 MAP@12。top_n 拉大等於要排序模型從 247 件裡挑 12 件，
 #    而不是從 98 件裡挑 —— 召回的上限提高了，但排序的準度可能反而掉。
-#    哪一邊的效應大，要等排序模型做出來、在驗證週上掃 k 才知道。現在沒有那個證據。
+#    哪一邊的效應大，要等排序模型做出來、在驗證週上掃 top_n 才知道。現在沒有那個證據。
 #
 # 2. 曲線上沒有拐點。報酬遞減但非常平緩，沒有哪裡突然掉一半。
 #    也就是說，光看覆蓋率曲線本身「看不出」正確答案在哪。
 #
-# 3. 剩下還有共購、ALS、語意三源沒做。那三源會改變 k 的邊際價值 ——
-#    如果它們各補 7-8%，k=50 就到 30% 了，根本不用動這個數字。
+# 3. 剩下還有共購、ALS、語意三源沒做。那三源會改變 top_n 的邊際價值 ——
+#    如果它們各補 7-8%，top_n=50 就到 30% 了，根本不用動這個數字。
 #
-# k 只是一個數字，改完重跑幾秒。反過來，先把候選池撐到每人 247 件、
+# top_n 只是一個數字，改完重跑幾秒。反過來，先把候選池撐到每人 247 件、
 # 等 W6 才發現排序模型的訓練資料大 2.5 倍跑不動，代價高得多。
 # 提案 §2.2.2 的預算是每人 50-100 件，50 剛好貼齊上限。
 #
-# 結論：五源做完先看總覆蓋率，不到 30% 才考慮提 k；
-#       最終的 k 等排序模型出來後用驗證週的 MAP 決定，不是用覆蓋率。
+# 結論：五源做完先看總覆蓋率，不到 30% 才考慮提 top_n；
+#       最終的 top_n 等排序模型出來後用驗證週的 MAP 決定，不是用覆蓋率。
 SEGMENT_TOP_K = 50
 
 
@@ -140,9 +142,9 @@ def repurchase(con: duckdb.DuckDBPyConnection, train_end: str,
 
 
 def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
-                    k: int = SEGMENT_TOP_K,
+                    top_n: int = SEGMENT_TOP_K,
                     days: int = dataset.POP_DAYS) -> int:
-    """建 cand_segment：每位顧客拿自己那一群最近 days 天賣最好的前 k 名。
+    """建 cand_segment：每位顧客拿自己那一群最近 days 天賣最好的前 top_n 名。
 
     分群是 (年齡層 × 主要品牌線)，共 35 群，定義在 dataset.build_segments。
     B1 基準線用的是同一組標籤 —— 兩邊若各分一次群，分數就不可比。
@@ -150,10 +152,14 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
     這一源專門補回購補不到的洞：回購只給得出「他買過的東西」，
     新客與換口味的人身上是空的。分群熱門對誰都給得出東西。
 
-    k 要在驗證週上掃描決定，不要看保留週的覆蓋率挑 ——
-    那是拿測試集調參數（共識 §1）。
+    top_n 要在驗證週上掃描決定，不要看保留週的覆蓋率挑 —— 那是拿測試集調參數（共識 §1）。
+    掃描結果與選 50 的理由見上面 SEGMENT_TOP_K 的註解。
 
-    排序加了 article_id 決勝，否則同票時每次跑出來的前 k 名會不一樣（共識 §4）。
+    注意 top_n 跟 evaluate.py 裡那些 k=12 不是同一回事：
+    那邊的 k 是「最終推薦幾件」（Kaggle 規定 12，不能改），
+    這裡的 top_n 是「每群撈幾件當候選」（我們自己選的）。
+
+    排序加了 article_id 決勝，否則同票時每次跑出來的前 top_n 名會不一樣（共識 §4）。
     """
     dataset.build_segments(con, train_end)
     start = dataset.pop_start_for(train_end, days)
@@ -175,7 +181,7 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
         FROM eval_cus e
         JOIN seg s USING (customer_id)
         JOIN ranked r ON r.ageband = s.ageband AND r.ig = s.ig
-        WHERE r.rk <= {k}
+        WHERE r.rk <= {top_n}
     """)
     return con.execute("SELECT count(*) FROM cand_segment").fetchone()[0]
 
@@ -213,7 +219,7 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
 
     為什麼要存檔：W6 的排序模型要用好幾個週次的候選池訓練（提案 §2.2.2 的多 fold），
     每次訓練都重算一遍太浪費；更重要的是**記憶體裡的東西沒有身分** ——
-    今天用 k=50 算一份、明天用 k=100 算一份，事後你分不出模型 A 是拿哪一份訓練的。
+    今天用 top_n=50 算一份、明天用 top_n=100 算一份，事後你分不出模型 A 是拿哪一份訓練的。
     存成檔案才追得回來。
 
     預設不存，因為量覆蓋率一天要跑好幾次，每次都寫 176 MB 沒意義。
