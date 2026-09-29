@@ -158,3 +158,49 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
         WHERE r.rk <= {k}
     """)
     return con.execute("SELECT count(*) FROM cand_segment").fetchone()[0]
+
+
+# 每一源在最終候選池裡對應的欄位名。加新的一源就在這裡多一行，build() 不用改。
+SOURCES = {
+    "cand_repurchase": "from_repurchase",
+    "cand_segment": "from_segment",
+}
+
+
+def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str) -> int:
+    """跑完所有召回源，合成最終候選池 cand。這是這個檔案的成品。
+
+    cand 一列一個 (顧客, 商品)，每一源各一個 0/1 欄位標記它有沒有撈到這件：
+
+        customer_id   article_id   from_repurchase   from_segment
+          顧客A       0751471001         1                0
+          顧客A       0918890002         0                1
+          顧客A       0448509014         1                1     ← 兩源都撈到
+
+    同一件被兩源撈到不是重複，是訊號 —— 兩個不同的理由都指向它。
+    所以這裡不能只做 UNION 去重，要把來源留下來：排序模型會拿「候選來自哪一源」
+    當特徵用（提案 §2.2.2 的交互特徵）。
+
+    test_start 同時是「訓練資料的上界」和「要評估的那一週的第一天」。
+    所有召回源都只讀它以前的交易；test_end 只用來決定要幫誰做推薦。
+    """
+    eval_customers(con, test_start, test_end)
+    repurchase(con, test_start)
+    segment_popular(con, test_start)
+
+    # 每一源先貼上自己的旗標，再用 GROUP BY 把同一個 (顧客, 商品) 併成一列。
+    # 內層用 UNION ALL 而不是 UNION：反正外層要 GROUP BY，UNION 會多做一次無用的去重。
+    cols = list(SOURCES.values())
+    parts = [
+        "SELECT customer_id, article_id, "
+        + ", ".join(f"{1 if c == flag else 0} AS {c}" for c in cols)
+        + f" FROM {table}"
+        for table, flag in SOURCES.items()
+    ]
+    con.execute(f"""
+        CREATE OR REPLACE TABLE cand AS
+        SELECT customer_id, article_id, {", ".join(f"max({c}) AS {c}" for c in cols)}
+        FROM ({" UNION ALL ".join(parts)})
+        GROUP BY 1, 2
+    """)
+    return con.execute("SELECT count(*) FROM cand").fetchone()[0]
