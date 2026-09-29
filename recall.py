@@ -89,7 +89,7 @@ REPURCHASE_WEEKS = 12
 #
 # 結論：五源做完先看總覆蓋率，不到 30% 才考慮提 top_n；
 #       最終的 top_n 等排序模型出來後用驗證週的 MAP 決定，不是用覆蓋率。
-SEGMENT_TOP_K = 50
+SEGMENT_TOP_N = 50
 
 
 def eval_customers(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str) -> int:
@@ -142,7 +142,7 @@ def repurchase(con: duckdb.DuckDBPyConnection, train_end: str,
 
 
 def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
-                    top_n: int = SEGMENT_TOP_K,
+                    top_n: int = SEGMENT_TOP_N,
                     days: int = dataset.POP_DAYS) -> int:
     """建 cand_segment：每位顧客拿自己那一群最近 days 天賣最好的前 top_n 名。
 
@@ -153,7 +153,7 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
     新客與換口味的人身上是空的。分群熱門對誰都給得出東西。
 
     top_n 要在驗證週上掃描決定，不要看保留週的覆蓋率挑 —— 那是拿測試集調參數（共識 §1）。
-    掃描結果與選 50 的理由見上面 SEGMENT_TOP_K 的註解。
+    掃描結果與選 50 的理由見上面 SEGMENT_TOP_N 的註解。
 
     注意 top_n 跟 evaluate.py 裡那些 k=12 不是同一回事：
     那邊的 k 是「最終推薦幾件」（Kaggle 規定 12，不能改），
