@@ -2,28 +2,43 @@
 共用的資料層。回答兩個問題：
 
   1. 「資料怎麼拿？」
-     → connect() 給你一個能直接下 SQL 的連線，tx / art / cus 都註冊好了。
+     → connect() 給你一個能直接下 SQL 的連線，六張檢視表都註冊好了：
+
+           tx              交易明細（3,178 萬筆）
+           cus / art       顧客、商品 —— 原始，NULL 原封不動
+           cus_c / art_c   同上，但套好建模共識 §3 的缺失值規格   ← 建模一律用這兩張
+
+       為什麼原始版要留著：eda.ipynb §3 得數缺失值才推得出那張規格表，
+       原始表一旦被補好，那一節會印出「全部無缺失」，共識的推導會把自己抹掉。
+
+     → build_segments(con, train_end) 再建出第七張 seg：每位顧客的
+       (年齡層, 主要品牌線)。B1 基準線與召回的「分群熱門」共用這一組標籤。
 
   2. 「資料的規格是什麼？」
      → 路徑在哪（DATA_DIR / PARQUET_DIR）、欄位什麼型別（TABLES）、
-       關鍵日期是哪幾天（LAST_DAY / HOLDOUT_START / LAST_4W_START）、
-       價格倍率多少（PRICE_SCALE）。
+       時間怎麼切（FIRST_DAY / VAL_START / VAL_END / HOLDOUT_START / HOLD_END / LAST_DAY）、
+       熱銷榜往回幾天（POP_DAYS / POP_START）、價格倍率多少（PRICE_SCALE）。
 
 第一個是動作，第二個是事實。兩者都只寫在這裡一份，所有模組共用。
 若未來，日期或型別要改時，改這一個地方，用到的地方全部跟著變。
 
+打分是另一件事，在 evaluate.py：MAP@12、答案卷、B0 / B1。
+
 用法範例（下面的 SQL 只是示意，換成你實際要查的就好）：
 
-    # 拿連線
     import dataset
+
     con = dataset.connect()
     con.execute("SELECT count(*) FROM tx").fetchone()
 
-    # 拿規格
-    from dataset import HOLDOUT_START
-    con.execute(f"SELECT * FROM tx WHERE t_dat >= '{HOLDOUT_START}'")
-"""
+    # 建模讀乾淨版，日期不要自己打字
+    con.execute(f"SELECT * FROM cus_c WHERE ageband = '20-29'")
+    con.execute(f"SELECT * FROM tx WHERE t_dat < '{dataset.HOLDOUT_START}'")
 
+    # 分群
+    dataset.build_segments(con, dataset.HOLDOUT_START)
+    con.execute("SELECT * FROM seg LIMIT 5").df()
+"""
 from __future__ import annotations
 
 import datetime as dt

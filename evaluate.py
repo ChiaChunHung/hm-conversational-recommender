@@ -68,6 +68,23 @@ def truth_of(con: duckdb.DuckDBPyConnection, start: str, end: str) -> list[list[
     """).df().iloc[:, 0])
 
 
+def truth_by_customer(con: duckdb.DuckDBPyConnection, start: str,
+                      end: str) -> dict[str, set[str]]:
+    """同樣是答案卷，但鍵是 customer_id：{顧客: {他買過的品項}}。
+
+    truth_of() 回傳的清單沒有名字。算 B0 / B1 沒差 —— 全站熱銷那 12 件每個人拿到的
+    推薦一模一樣，不必知道哪張卷子是誰的。但召回給每位顧客的候選池都不同，
+    沒有名字就配不起來，覆蓋率與逐顧客 MAP 都算不出來。
+
+    保留週跑出來是 68,984 個鍵、213,728 組（顧客 × 品項）。
+    """
+    df = con.execute(f"""
+        SELECT customer_id, list(DISTINCT article_id) AS truth FROM tx
+        WHERE t_dat >= '{start}' AND t_dat < '{end}' GROUP BY 1
+    """).df()
+    return {r.customer_id: set(r.truth) for r in df.itertuples()}
+
+
 def segment_top(con: duckdb.DuckDBPyConnection, pop_start: str, pop_end: str,
                 k: int = 12) -> dict[tuple[str, str], list[str]]:
     """每個分群在 [pop_start, pop_end) 的熱銷前 k 名，鍵是 (年齡層, 品牌線)。
