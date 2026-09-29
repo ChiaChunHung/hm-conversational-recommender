@@ -63,7 +63,8 @@ python main.py build
 | `main.py` | 入口。只做命令列分派，實際工作在模組裡 |
 | `dataset.py` | 共用資料層：路徑、型別、時間邊界、DuckDB 連線 |
 | `prepare.py` | CSV → Parquet 轉檔 |
-| `eda.ipynb` | 資料探索：提案附錄 A 的 19 項統計 + 圖表 |
+| `evaluate.py` | 評估層：MAP@12 打分、答案卷、B0 / B1 基準線 |
+| `eda.ipynb` | 資料探索：推導建模共識（附錄 A 統計、缺失值規格、基準線） |
 
 之後新增的模組（召回、排序、評估）平行放在同一層，各自在 `main.py` 的
 `COMMANDS` 註冊一個指令。
