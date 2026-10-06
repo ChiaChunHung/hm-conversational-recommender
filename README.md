@@ -6,7 +6,8 @@
 ## 環境需求
 
 - Python 3.10 以上
-- 套件：`duckdb`、`pandas`、`matplotlib`、`ipykernel`（見 `requirements.txt`）
+- 套件：`duckdb`、`pandas`、`numpy`、`scipy`、`implicit`、`matplotlib`、`ipykernel`（見 `requirements.txt`）
+- `implicit` 是召回階段的 ALS 用的，只有 `recall.als()` 會 import 它
 
 裝在虛擬環境裡，不要裝到全域 Python：
 
@@ -63,11 +64,16 @@ python main.py build
 | `main.py` | 入口。只做命令列分派，實際工作在模組裡 |
 | `dataset.py` | 共用資料層：路徑、型別、時間邊界、DuckDB 連線 |
 | `prepare.py` | CSV → Parquet 轉檔 |
-| `evaluate.py` | 評估層：MAP@12 打分、答案卷、B0 / B1 基準線 |
+| `evaluate.py` | 評估層：MAP@12 打分、答案卷、召回撈中率、B0 / B1 基準線 |
+| `recall.py` | 第一階段候選召回：回購、分群熱門、共購、ALS 四源 + 候選池組裝 |
 | `eda.ipynb` | 資料探索：推導建模共識（附錄 A 統計、缺失值規格、基準線） |
 
-之後新增的模組（召回、排序、評估）平行放在同一層，各自在 `main.py` 的
-`COMMANDS` 註冊一個指令。
+`evaluate.py` 與 `recall.py` 目前只供 import，沒有在 `main.py` 的 `COMMANDS`
+註冊指令。之後的排序模組平行放在同一層。
+
+**`recall.py` 的模組 docstring 是這個專案最長的一份說明**，裡面有【名詞對照】
+（撈中率、MAP@12、2.5% 目標分別是什麼、屬於哪一階段）和【待解決】（目前的瓶頸
+與決議）。要動召回或排序之前先讀那兩節。
 
 ## 執行
 
@@ -145,6 +151,14 @@ git config core.hooksPath .githooks
 | 週次 | 內容 | 狀態 |
 |---|---|---|
 | W3 | 執行提案 | 完成 |
-| W4 | 資料管線、探索分析、評估框架、B0 / B1 基準線 | 進行中 |
-| W5 | 召回模組 | 未開始 |
+| W4 | 資料管線、探索分析、評估框架、B0 / B1 基準線 | 完成（B0 0.00710、B1 0.00927，保留週）|
+| W5 | 召回模組：四源 + 候選池組裝 + 撈中率 | 四源完成；驗收標準兩條中達成一條 |
 | W6–W7 | LightGBM 排序模型 | 未開始 |
+| W8 | 商品文字向量 + ChromaDB（語意檢索那一源） | 未開始 |
+
+W5 的驗收標準是「保留週被召回的比例 ≥ 30%」與「ALS 兩種用法完成比較」。
+後者已完成（原始 vs BM25 加權，結論記在 `recall.py` 的 `ALS_FACTORS` 註解）；
+前者目前在驗證週是 17.0%，沒達到。決議是先做 W6 的排序模型，看它實際發揮到上限
+的幾成，再決定要不要放大候選池 —— 完整理由見 `recall.py` 的【待解決】。
+
+保留週的數字封存中，只在 W5 收尾時量一次，所以這裡引的召回數字一律是驗證週。
