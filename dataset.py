@@ -12,12 +12,17 @@
        原始表一旦被補好，那一節會印出「全部無缺失」，共識的推導會把自己抹掉。
 
      → build_segments(con, train_end) 再建出第六張 seg：每位顧客的
-       (年齡層, 主要品牌線)。B1 基準線與召回的「分群熱門」共用這一組標籤。
+       (年齡層, 主要品牌線)。B1 基準線與召回的「分群熱門」都讀這張表，
+       但**兩邊用的欄位不一樣** —— 細節見 build_segments() 的說明。
 
   2. 「資料的規格是什麼？」
      → 路徑在哪（DATA_DIR / PARQUET_DIR / CAND_DIR）、欄位什麼型別（TABLES）、
        時間怎麼切（FIRST_DAY / VAL_START / VAL_END / HOLDOUT_START / HOLD_END / LAST_DAY）、
        熱銷榜往回幾天（POP_DAYS / POP_START）、價格倍率多少（PRICE_SCALE）。
+
+       注意 POP_DAYS（14 天）是 **B0 / B1 基準線**用的，當初用 MAP@12 選出來。
+       召回的「分群熱門」有自己的 recall.SEGMENT_DAYS（5 天），因為它要最大化的
+       是撈中率而不是 MAP，掃出來的最佳值不一樣。改 POP_DAYS 會動到已交付的基準線。
 
 第一個是動作，第二個是事實。兩者都只寫在這裡一份，所有模組共用。
 若未來，日期或型別要改時，改這一個地方，用到的地方全部跟著變。
@@ -32,7 +37,7 @@
     con.execute("SELECT count(*) FROM tx").fetchone()
 
     # 建模讀乾淨版，日期不要自己打字
-    con.execute(f"SELECT * FROM cus_c WHERE ageband = '20-29'")
+    con.execute("SELECT * FROM cus_c WHERE ageband = '20-29'")
     con.execute(f"SELECT * FROM tx WHERE t_dat < '{dataset.HOLDOUT_START}'")
 
     # 分群
@@ -232,12 +237,26 @@ def register_clean_views(con: duckdb.DuckDBPyConnection) -> None:
 def build_segments(con: duckdb.DuckDBPyConnection, train_end: str) -> None:
     """建立檢視表 seg：每位顧客的 (年齡層, 主要品牌線)。
 
-    這是 B1 基準線的分群依據，也是召回「分群熱門」那一源的分群依據 ——
-    兩邊必須是同一組標籤，所以定義只放這裡一份。
-    7 個年齡層 × 6 條品牌線（5 種 + 沒有購買紀錄的「未知」）＝ 42 組，顧客身上全部出現得到。
-    但其中 7 組整組都是「未知」品牌線，共 15,271 位顧客 —— 他們在 train_end 以前沒買過東西，
-    自然也不會出現在熱銷區間的交易裡，所以排不出分群熱銷榜，會整份落回 B0。
-    B1 實際用到的是剩下的 35 群，共識 §4 的「35 個分群」指的就是這個。
+    7 個年齡層 × 6 條品牌線（5 種 + 沒有購買紀錄的「未知」）＝ 42 組標籤，
+    每位顧客都落在其中一組。兩個欄位的來源不同，這件事很重要：
+
+        ageband   從 cus_c.age 算的，來自 customers.csv，**跟購買紀錄無關**
+        ig        從交易歷史算的「主要品牌線」，沒買過的人是「未知」
+
+    **誰讀這張表、怎麼分群（2026-10-15 起兩邊分岔）：**
+
+        B1 基準線        用 (ageband, ig)    42 組裡有 35 組排得出熱銷榜
+        召回的分群熱門   只用 (ageband)      7 群，全部排得出
+
+    分岔是刻意的。B1 的分群是 W4 用 MAP@12 選出來的、已經交付；召回後來實測
+    「只用年齡層」的撈中率更高（兩折都是），而且順帶讓純新客也拿得到候選。
+    不該讓召回的結論回頭改掉已交付的基準線，所以兩邊各用自己的欄位組合。
+    共用的是這張表本身，不是分群方式。推導見 recall.SEGMENT_KEYS 的註解。
+
+    那 7 組「未知」品牌線的顧客在 train_end 以前沒買過東西，不會出現在熱銷區間的
+    交易裡，所以在 (ageband, ig) 的分法下排不出榜、會整份落回 B0。人數隨 train_end
+    變動：train_end=2020-09-16（保留週）時 15,271 人，=2020-09-09（驗證週）時
+    20,666 人。共識 §4 的「35 個分群」指的就是扣掉這 7 組之後的數字。
 
     train_end 一定要傳，不能寫死：主要品牌線是從交易歷史算出來的，若把要評估的那一週
     也算進去，就變成用「他那週買了什麼」決定他屬於哪一群，再拿那一群的熱門去預測

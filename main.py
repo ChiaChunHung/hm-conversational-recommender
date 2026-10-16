@@ -9,9 +9,9 @@ H&M 對話式推薦系統 — 專案入口。
 
 資料探索統計在 eda.ipynb。
 
-為什麼用 DuckDB 而不是 SQLite：
-  SQLite 是列式儲存，為「抓出或更新某一筆」設計；我們做的全是「掃過三千萬筆算統計」，
-  那是欄式儲存的強項。而且 DuckDB 可以直接對 CSV / Parquet 下 SQL，沒有匯入這一步。
+為什麼用 DuckDB 而不是 SQLite：我們做的全是「掃過三千萬筆算統計」，那是欄式儲存
+的強項，而 SQLite 是列式、為「抓出或更新某一筆」設計。完整理由與實測見 README，
+以及 vault 的《為什麼用 DuckDB + Parquet 而不是 SQLite》—— 這裡不重複。
 """
 
 from __future__ import annotations
@@ -41,8 +41,12 @@ def cmd_build(argv: list[str]) -> None:
 # 右邊的 cmd_build 沒有括號，存的是「函式本身」而不是「執行結果」；
 # 加了括號的話程式一啟動就會直接轉檔，而不是等你下指令。
 #
-# 之後新增模組就在這裡多一行，例如 "eval": cmd_eval、"recall": cmd_recall，
-# 下面的 main() 完全不用改。
+# 之後新增模組就在這裡多一行，下面的 main() 完全不用改。
+#
+# **不是每個模組都該註冊。** evaluate.py 與 recall.py 刻意沒有指令 —— 它們是函式庫，
+# 每次呼叫的參數都不一樣（測哪一週、掃哪個 top_n），包成單一指令反而綁手綁腳，
+# 用 import 的方式從 notebook 或實驗腳本呼叫才合用。
+# 會變成指令的是「跑一次就結束」的動作，例如 build 轉檔，或之後排序模型的訓練。
 COMMANDS = {
     "build": cmd_build,
 }
