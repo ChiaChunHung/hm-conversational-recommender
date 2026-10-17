@@ -380,6 +380,10 @@ ALS_WEEKS = 6
 ALS_FACTORS = 64
 ALS_TOP_N = 25
 
+# 第一種用法（als_similar）每件商品帶幾個最像的。初值取 5，跟共購的 COOC_TOP_N
+# 一樣，這樣兩源的比較是同一個預算下的比較。掃描結果見下面那張比較表。
+ALS_SIM_TOP_N = 5
+
 
 def eval_customers(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str) -> int:
     """決定「要幫誰做推薦」，答案存成檢視表 eval_cus。
@@ -624,35 +628,36 @@ def cooccurrence(con: duckdb.DuckDBPyConnection, train_end: str,
     return con.execute("SELECT count(*) FROM cand_cooc").fetchone()[0]
 
 
-def als(con: duckdb.DuckDBPyConnection, train_end: str, top_n: int = ALS_TOP_N,
-        weeks: int = ALS_WEEKS, factors: int = ALS_FACTORS, seed: int = 42) -> int:
-    """建 cand_als：用矩陣分解找出「口味相近的人在買什麼」，每人取 top_n 件。
-
-    它從「誰買過什麼」這張稀疏表裡自己學出隱藏的口味維度，把每位顧客和每件商品都
-    壓成一個 64 維向量，兩個向量相乘就是預測分數。
-
-    只有隱性回饋：資料裡只有「買了」，沒有「不喜歡」。沒買過不等於不喜歡，可能只是
-    沒看過 —— 這就是 implicit 這個套件名字的由來，它的損失函數是為這種資料設計的，
-    不能拿評分預測那一套來套。
-
-    共識 §2 允許推薦顧客已買過的商品，所以 filter_already_liked_items=False。
-
-    seed 一定要固定。ALS 的因子是隨機初始化的，不固定的話同一份資料每次跑出不同的
-    候選池，你會分不出分數變動是模型改善還是雜訊（共識 §4）。
-
-    記憶體：只把整數索引拉進 Python，字串 ID 留在 DuckDB 最後再 join 回來。
-    近 6 週的稀疏矩陣約 11 MB（149 萬個非零值，每個 8 bytes）。
-    """
+def _als_deps():
+    """ALS 要用的套件。單獨一支，是為了把「缺套件」的錯誤講清楚。"""
     try:
         import numpy as np
         import scipy.sparse as sp
         from implicit.als import AlternatingLeastSquares
         from implicit.nearest_neighbours import bm25_weight
+        return np, sp, AlternatingLeastSquares, bm25_weight
     except ModuleNotFoundError as e:
         raise ModuleNotFoundError(
             f"ALS 需要 implicit 套件（缺少 {e.name}）。請執行：pip install -r requirements.txt"
         ) from e
 
+
+def _als_fit(con: duckdb.DuckDBPyConnection, train_end: str,
+             weeks: int, factors: int, seed: int):
+    """建 als_ix（字串 ID ↔ 整數索引）、訓練 ALS，回傳 (model, mat)。
+
+    **兩種用法共用這一段**，因為它們只差在用哪一邊的隱因子：
+    als() 用顧客隱因子（model.user_factors），als_similar() 用商品隱因子
+    （model.item_factors）。訓練一次約 20 秒，要比較兩種用法時把回傳值傳給
+    als_similar(model_mat=...) 就不用訓練兩次。
+
+    seed 一定要固定。ALS 的因子是隨機初始化的，不固定的話同一份資料每次跑出不同的
+    候選池，你會分不出分數變動是模型改善還是雜訊（共識 §4）。
+
+    記憶體：只把整數索引拉進 Python，字串 ID 留在 DuckDB 最後再 join 回來。
+    近 6 週的稀疏矩陣約 11 MB（149 萬個非零值）。
+    """
+    np, sp, AlternatingLeastSquares, bm25_weight = _als_deps()
     start = dataset.pop_start_for(train_end, weeks * 7)
 
     # 先在 SQL 裡把字串 ID 換成連號整數 —— 稀疏矩陣只吃得下整數，
@@ -686,6 +691,28 @@ def als(con: duckdb.DuckDBPyConnection, train_end: str, top_n: int = ALS_TOP_N,
 
     model = AlternatingLeastSquares(factors=factors, random_state=seed)
     model.fit(mat, show_progress=False)
+    return model, mat
+
+
+def als(con: duckdb.DuckDBPyConnection, train_end: str, top_n: int = ALS_TOP_N,
+        weeks: int = ALS_WEEKS, factors: int = ALS_FACTORS, seed: int = 42,
+        model_mat=None) -> int:
+    """建 cand_als：**ALS 的第二種用法** —— 用顧客隱因子對全商品打分，每人取 top_n 件。
+
+    問的是「這個人會喜歡什麼」：拿他的 64 維向量去跟所有商品向量相乘，取分數最高的
+    top_n 件。所以它給得出「他沒買過、跟他買過的也不像」的東西 —— 那是前三源都給不出
+    來的，理由是口味相近的別人買了。
+
+    只有隱性回饋：資料裡只有「買了」，沒有「不喜歡」。沒買過不等於不喜歡，可能只是
+    沒看過 —— 這就是 implicit 這個套件名字的由來，它的損失函數是為這種資料設計的，
+    不能拿評分預測那一套來套。
+
+    共識 §2 允許推薦顧客已買過的商品，所以 filter_already_liked_items=False。
+
+    另一種用法見 als_similar()。兩種的比較見 ALS_SIM_TOP_N 的註解。
+    """
+    np, _, _, _ = _als_deps()
+    model, mat = model_mat if model_mat else _als_fit(con, train_end, weeks, factors, seed)
 
     # 只對要評估的顧客做推薦。他們之中有人在這段窗口沒有互動（新客），
     # ALS 給不出東西，那些人靠其他源補。
@@ -708,6 +735,64 @@ def als(con: duckdb.DuckDBPyConnection, train_end: str, top_n: int = ALS_TOP_N,
     """)
     con.unregister("als_rec")
     return con.execute("SELECT count(*) FROM cand_als").fetchone()[0]
+
+
+def als_similar(con: duckdb.DuckDBPyConnection, train_end: str,
+                top_n: int = ALS_SIM_TOP_N, weeks: int = ALS_WEEKS,
+                factors: int = ALS_FACTORS, seed: int = 42, model_mat=None) -> int:
+    """建 cand_als_sim：**ALS 的第一種用法** —— 用商品隱因子算商品相似度。
+
+    問的是「跟這件最像的是哪幾件」：拿商品的 64 維向量互比，每件留 top_n 個最像的，
+    再把顧客近 weeks 週買過的每一件各帶 top_n 件進候選池。
+
+    **形狀跟 cooccurrence() 一模一樣**（都是「你買過 X，所以給你跟 X 有關的」），
+    差別只在「有關」怎麼定義：
+
+        共購          同一顧客同一天被一起買的次數      直接數出來的
+        ALS 相似度    兩件商品的隱因子向量夾角          模型學出來的
+
+    所以這兩源可以直接比，提案 §2.2.2 承諾的「ALS 兩種用法比較」就是比這個。
+
+    model_mat 可以把 _als_fit() 的回傳值傳進來共用一次訓練（省 20 秒），
+    平常不用給。
+    """
+    np, _, _, _ = _als_deps()
+    model, mat = model_mat if model_mat else _als_fit(con, train_end, weeks, factors, seed)
+    start = dataset.pop_start_for(train_end, weeks * 7)
+
+    # 只對「評估對象真的買過的商品」找鄰居 —— 別人沒買過的商品，找了也沒人用得到。
+    items = con.execute("""
+        SELECT DISTINCT i.ai FROM als_ix i JOIN eval_cus e USING (customer_id) ORDER BY 1
+    """).df()["ai"].to_numpy()
+
+    # N 要多取一個：similar_items 的第一名一定是自己（跟自己的夾角為 0）。
+    ids, _ = model.similar_items(items, N=top_n + 1)
+    sim = pd.DataFrame({
+        "i": np.repeat(items, ids.shape[1]).astype("int32"),
+        "j": ids.reshape(-1).astype("int32"),
+    })
+    sim = sim[sim["i"] != sim["j"]]
+
+    con.register("als_sim_raw", sim)
+    con.execute("""
+        CREATE OR REPLACE TABLE als_sim AS
+        SELECT ai.article_id AS i, aj.article_id AS j
+        FROM als_sim_raw s
+        JOIN (SELECT DISTINCT article_id, ai FROM als_ix) ai ON ai.ai = s.i
+        JOIN (SELECT DISTINCT article_id, ai FROM als_ix) aj ON aj.ai = s.j
+    """)
+    con.unregister("als_sim_raw")
+
+    # 這一段跟 cooccurrence() 的第二段只差 JOIN 的是 als_sim 還是 cooc 的 top 表。
+    con.execute(f"""
+        CREATE OR REPLACE TABLE cand_als_sim AS
+        SELECT DISTINCT t.customer_id, s.j AS article_id
+        FROM tx t
+        JOIN eval_cus USING (customer_id)
+        JOIN als_sim s ON s.i = t.article_id
+        WHERE t.t_dat >= '{start}' AND t.t_dat < '{train_end}'
+    """)
+    return con.execute("SELECT count(*) FROM cand_als_sim").fetchone()[0]
 
 
 # 每一源在最終候選池裡對應的欄位名。加新的一源就在這裡多一行，build() 不用改。
