@@ -191,7 +191,7 @@ def register_clean_views(con: duckdb.DuckDBPyConnection) -> None:
         cus_c / art_c   套好共識 §3            → 召回、排序、對話層用
     """
     # age 不補值：補中位數會讓「真的 32 歲」和「不知道幾歲」分不出來。
-    # 缺的年齡改以 ageband 的「未填」承接 —— 分群鍵必須讓每位顧客都落在某一群，
+    # 缺的年齡改以 ageband 的 'Missing' 承接 —— 分群鍵必須讓每位顧客都落在某一群，
     # 否則那 15,861 人（含 292 位保留週買家）會分不到群、拿不到推薦。
     con.execute("""
         CREATE OR REPLACE VIEW cus_c AS
@@ -208,7 +208,7 @@ def register_clean_views(con: duckdb.DuckDBPyConnection) -> None:
                          OR upper(fashion_news_frequency) = 'NONE'
                     THEN 'NONE' ELSE fashion_news_frequency END AS fashion_news_frequency,
                age,
-               CASE WHEN age IS NULL THEN '未填'
+               CASE WHEN age IS NULL THEN 'Missing'
                     WHEN age < 20 THEN '<20'
                     WHEN age < 30 THEN '20-29'
                     WHEN age < 40 THEN '30-39'
@@ -237,11 +237,15 @@ def register_clean_views(con: duckdb.DuckDBPyConnection) -> None:
 def build_segments(con: duckdb.DuckDBPyConnection, train_end: str) -> None:
     """建立檢視表 seg：每位顧客的 (年齡層, 主要品牌線)。
 
-    7 個年齡層 × 6 條品牌線（5 種 + 沒有購買紀錄的「未知」）＝ 42 組標籤，
+    7 個年齡層 × 6 條品牌線（5 種 + 沒有購買紀錄的 'Unknown'）＝ 42 組標籤，
     每位顧客都落在其中一組。兩個欄位的來源不同，這件事很重要：
 
         ageband   從 cus_c.age 算的，來自 customers.csv，**跟購買紀錄無關**
-        ig        從交易歷史算的「主要品牌線」，沒買過的人是「未知」
+        ig        從交易歷史算的「主要品牌線」，沒買過的人是 'Unknown'
+
+    兩個欄位的缺值記號（'Missing' / 'Unknown'）是這個函式自己填的，不是資料裡的值
+    —— index_group_name 本身是英文（Ladieswear、Divided…）。recall.SEGMENT_UNKNOWN
+    要跟這裡一字不差，否則降級鏈會把缺值當成有效標籤。
 
     **誰讀這張表、怎麼分群（2026-10-15 起兩邊分岔）：**
 
@@ -249,13 +253,13 @@ def build_segments(con: duckdb.DuckDBPyConnection, train_end: str) -> None:
         召回的分群熱門   四階降級鏈             每位顧客用他的標籤湊得出來的第一階
 
     分岔是刻意的。B1 的分群是 W4 用 MAP@12 選出來的、已經交付；召回是用撈中率選的，
-    而且在 (ageband, ig) 這一種切法下，純新客的 ig 是「未知」、那一群零交易、排不出
+    而且在 (ageband, ig) 這一種切法下，純新客的 ig 是 'Unknown'、那一群零交易、排不出
     熱銷榜 —— 所以召回改走降級鏈，讓每個人都拿得到候選。不該讓召回的結論回頭改掉
     已交付的基準線，所以兩邊各用自己的切法。
     **共用的是這張表本身（誰屬於哪一群），不是切法。** 推導見 recall.SEGMENT_LADDER
     的註解。
 
-    那 7 組「未知」品牌線的顧客在 train_end 以前沒買過東西，不會出現在熱銷區間的
+    那 7 組 'Unknown' 品牌線的顧客在 train_end 以前沒買過東西，不會出現在熱銷區間的
     交易裡，所以在 (ageband, ig) 的分法下排不出榜、會整份落回 B0。人數隨 train_end
     變動：train_end=2020-09-16（保留週）時 15,271 人，=2020-09-09（驗證週）時
     20,666 人。共識 §4 的「35 個分群」指的就是扣掉這 7 組之後的數字。
@@ -266,7 +270,7 @@ def build_segments(con: duckdb.DuckDBPyConnection, train_end: str) -> None:
     """
     con.execute(f"""
         CREATE OR REPLACE VIEW seg AS
-        SELECT c.customer_id, c.ageband, coalesce(d.ig, '未知') AS ig
+        SELECT c.customer_id, c.ageband, coalesce(d.ig, 'Unknown') AS ig
         FROM cus_c c
         LEFT JOIN (
             -- 每位顧客買最多的那條品牌線。平手時以名稱字母序決勝：
@@ -278,7 +282,7 @@ def build_segments(con: duckdb.DuckDBPyConnection, train_end: str) -> None:
             GROUP BY 1
         ) d USING (customer_id)
         -- LEFT JOIN 而非 JOIN：有 9,699 位顧客從未買過任何東西，
-        -- 用 JOIN 他們會整個消失，用 LEFT JOIN 則歸進「未知」品牌線。
+        -- 用 JOIN 他們會整個消失，用 LEFT JOIN 則歸進 'Unknown' 品牌線。
     """)
 
 

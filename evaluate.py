@@ -136,12 +136,13 @@ def coverage(con: duckdb.DuckDBPyConnection, sources: list[str],
     macro 高於 micro 代表輕度買家被照顧得比重度買家好，反過來就是重度買家佔便宜。
     兩者差很多時值得往下查是哪一群人被漏掉。
 
-    另外回傳三個「池子有多大」的數字：候選組數、有候選的顧客數、平均每人候選數。
+    另外回傳三個「池子有多大」的數字：cand_pairs（候選組數）、customers_with_cand
+    （有候選的顧客數）、cand_per_customer（平均每人候選數）。
 
-    > 平均每人候選數 ＝ 候選組數 ÷ **有候選的顧客數**，分母不是買家數。
+    > cand_per_customer ＝ cand_pairs ÷ **customers_with_cand**，分母不是買家數。
     > 這兩個數字可能不一樣 —— 若某些買家四個源都撈不到，他們不在分母裡，
-    > 於是「平均每人候選數」看起來很正常，實際上有人是零。
-    > 判斷方法：比對回傳的「有候選的顧客數」與 eval_cus 的列數，不相等就有人掛零。
+    > 於是 cand_per_customer 看起來很正常，實際上有人是零。
+    > 判斷方法：比對 customers_with_cand 與 eval_cus 的列數，不相等就有人掛零。
 
     全部在 SQL 裡算完，只把幾個數字拉出來。
     """
@@ -161,17 +162,17 @@ def coverage(con: duckdb.DuckDBPyConnection, sources: list[str],
              )
         -- 全部寫成純量子查詢。把 hit 和 per_cus 擺在同一個 FROM 會變成交叉連接，
         -- 213,728 × 68,984 ＝ 147 億列。
-        SELECT (SELECT count(*) FROM hit)                      AS 正解組數,
-               (SELECT count(*) FROM hit WHERE hit)            AS 命中組數,
+        SELECT (SELECT count(*) FROM hit)                      AS truth_pairs,
+               (SELECT count(*) FROM hit WHERE hit)            AS hit_pairs,
                (SELECT avg(c) FROM per_cus)                    AS macro,
-               (SELECT count(*) FROM cand)                     AS 候選組數,
-               (SELECT count(DISTINCT customer_id) FROM cand)  AS 有候選的顧客數
+               (SELECT count(*) FROM cand)                     AS cand_pairs,
+               (SELECT count(DISTINCT customer_id) FROM cand)  AS customers_with_cand
     """).fetchone()
     n_truth, n_hit, macro, n_cand, n_cus = row
-    return {"正解組數": n_truth, "命中組數": n_hit,
+    return {"truth_pairs": n_truth, "hit_pairs": n_hit,
             "micro": n_hit / n_truth, "macro": macro,
-            "候選組數": n_cand, "有候選的顧客數": n_cus,
-            "平均每人候選數": n_cand / n_cus if n_cus else 0.0}
+            "cand_pairs": n_cand, "customers_with_cand": n_cus,
+            "cand_per_customer": n_cand / n_cus if n_cus else 0.0}
 
 
 def segment_top(con: duckdb.DuckDBPyConnection, pop_start: str, pop_end: str,
@@ -219,6 +220,6 @@ def evaluate(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
     a0 = np.array([ap_at_k(set(t), b0) for t in gt["truth"]])
     a1 = np.array([ap_at_k(set(r.truth), pad_to_k(segs.get((r.ageband, r.ig), []), b0))
                    for r in gt.itertuples()])
-    return {"買家數": len(gt), "分群數": len(segs),
+    return {"buyers": len(gt), "segments": len(segs),
             "B0": a0.mean(), "B1": a1.mean(),
-            "B0命中率": (a0 > 0).mean(), "B1命中率": (a1 > 0).mean()}
+            "B0_hit_rate": (a0 > 0).mean(), "B1_hit_rate": (a1 > 0).mean()}
