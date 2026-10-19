@@ -8,8 +8,8 @@
 
     欄位              對應的商品欄位                  能填的值
     index_group       index_group_name               5 種品牌線，例如 Ladieswear
-    product_group     product_group_name             19 種大類，例如 Garment Upper body
-    product_type      product_type_name              131 種細類，例如 Dress
+    product_group     product_group_name             18 種大類，例如 Garment Upper body
+    product_type      product_type_name              127 種細類，例如 Dress
     colour            perceived_colour_master_name   18 種大色系，例如 Black
     colour_exclude    同上                           同上
 
@@ -32,7 +32,7 @@ Dark Grey、Light Grey 還是會出現。這裡每個條件只對應一個欄位
     兩欄是同一件事的粗細兩種說法，用「且」的話「上衣或洋裝」會什麼都找不到。
     原則是寧寬勿窄：拿不準時填大類，不相關的會被查詢句排到後面，不會被剔掉
   - 只有使用者明確說「要／不要」的才填。「最好是碎花」這類偏好寫進查詢句，不要填進表格
-    （vault《LLM 提示詞》規則 6）
+    （vault《LLM 提示詞》規則 4）
 
 **價格條件暫緩。** 表格目前沒有價格欄位，原因與已查過的資料見 vault《設計決策紀錄》第 10 項。
 LLM 若傳了 price_max 或 price_band 會直接報錯，不會默默忽略 —— 忽略的話使用者說
