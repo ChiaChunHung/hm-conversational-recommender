@@ -32,7 +32,7 @@
 
 **怎麼跑**
 
-    pip install sentence-transformers         還沒寫進 requirements.txt，併回 main 時要補
+    pip install -r requirements.txt           含 sentence-transformers（會裝 PyTorch，下載量較大）
     python main.py build                      先要有 Parquet
     python semantic.py build                  建向量（M4 Pro 幾分鐘）
     python semantic.py search "elegant midi dress in chiffon" --where '{"colour_exclude": "Black"}'
