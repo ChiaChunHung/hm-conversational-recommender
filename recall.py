@@ -573,9 +573,14 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
     dataset.build_segments 產出的那份標籤（所以 days 吃 SEGMENT_DAYS 而不是
     dataset.POP_DAYS，理由見 SEGMENT_DAYS 的註解）。
 
-    表的欄位是 (customer_id, article_id, score, rk)：score 是那一群在窗口內賣出的
-    件數，rk 是它在那份榜上的名次（1 是賣最多的）。同一位顧客只會落在一階，所以
-    名次是那一階那份榜上的名次。
+    表的欄位是 (customer_id, article_id, score, rk)：score 是它佔那一群在窗口內
+    總銷量的比例，rk 是它在那份榜上的名次（1 是賣最多的）。同一位顧客只會落在一階，
+    所以名次是那一階那份榜上的名次。
+
+    score 用比例而不用件數：各群大小差很多（驗證週各群第 1 名從 2 件到 535 件），
+    用件數的話，大群的第 170 名會比小群的第 1 名分數高，排序模型學到的會是「這群
+    有多大」而不是「這件在群裡多熱門」。比例的代價是小群的比例比較不穩（2 件裡
+    賣 1 件就是 50%），群的大小交給 W6 的顧客特徵去表達。
 
     排序固定加 article_id 決勝，否則同票時每次跑出來的前 top_n 名會不一樣（共識 §4）。
     """
@@ -597,16 +602,17 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
             cols = ", ".join(keys)
             picked = ", ".join("s.%s" % c for c in keys)
             rungs.append(
-                "r%d AS (SELECT %s, article_id, n, row_number() OVER ("
+                "r%d AS (SELECT %s, article_id, n / sum(n) OVER (PARTITION BY %s) AS share, "
+                "row_number() OVER ("
                 "PARTITION BY %s ORDER BY n DESC, article_id) AS rk FROM ("
                 "SELECT %s, t.article_id, count(*) AS n FROM tx t "
                 "JOIN seg s USING (customer_id) "
                 "WHERE t.t_dat >= '%s' AND t.t_dat < '%s' GROUP BY ALL))"
-                % (n, cols, cols, picked, start, train_end)
+                % (n, cols, cols, cols, picked, start, train_end)
             )
         else:
             rungs.append(
-                "r%d AS (SELECT article_id, n, row_number() OVER ("
+                "r%d AS (SELECT article_id, n / sum(n) OVER () AS share, row_number() OVER ("
                 "ORDER BY n DESC, article_id) AS rk FROM ("
                 "SELECT article_id, count(*) AS n FROM tx "
                 "WHERE t_dat >= '%s' AND t_dat < '%s' GROUP BY 1))"
@@ -626,7 +632,7 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
     for n, keys in enumerate(ladder):
         on = " AND ".join("r.%s = w.%s" % (c, c) for c in keys) if keys else "TRUE"
         picks.append(
-            "SELECT w.customer_id, r.article_id, r.n::DOUBLE AS score, r.rk "
+            "SELECT w.customer_id, r.article_id, r.share::DOUBLE AS score, r.rk "
             "FROM who w JOIN r%d r ON %s "
             "WHERE w.tier = %d AND r.rk <= %d" % (n, on, n, top_n)
         )
@@ -904,23 +910,23 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
           save: bool = False) -> int:
     """跑完所有召回源，合成最終候選池 cand。這是這個檔案的成品。
 
-    cand 一列一個 (顧客, 商品)。每一源有三個欄位，加上兩個彙總欄位：
+    cand 一列一個 (顧客, 商品)。每一源有三個欄位，加上一個彙總欄位：
 
         from_<源>    0/1，這一源有沒有撈到這件
         score_<源>   這一源給它的分數；沒撈到是空值（不是 0）
         rank_<源>    這一源給這位顧客的名次，1 最好；沒撈到是空值
         n_sources    幾個源撈到它（0/1 旗標加總）
-        best_rank    各源名次裡最前面的那個
 
         customer_id  article_id  from_repurchase score_repurchase rank_repurchase  ...
           顧客A      0751471001         1               3.0              1          ...
           顧客A      0918890002         0              空值            空值          ...
 
-    **各源的 score 是不同的尺，不能互相比大小**：回購是買過的天數、分群是那一群
-    賣出的件數、共購是共購次數加總、ALS 是向量內積。放進同一個模型當特徵沒問題
+    **各源的 score 是不同的尺，不能互相比大小**：回購是買過的天數、分群是佔那一群
+    銷量的比例、共購是共購次數加總、ALS 是向量內積。放進同一個模型當特徵沒問題
     （樹模型只看各欄自己的切分），但不能把四個分數加起來當一個總分。名次也只在
     各源自己的名單裡有意義：回購的第 1 名是「最近買的」，分群的第 1 名是「那一群
-    賣最多的」。
+    賣最多的」。所以**不要做跨源的名次彙總**（例如取四源名次的最小值）—— 把意思
+    不同的 1 拿來比，得到的數字說不出是什麼意思。
 
     同一件被多源撈到不是重複，是訊號 —— 好幾個不同的理由都指向它。所以這裡不能只做
     UNION 去重，要把來源留下來：排序模型會拿它當特徵（提案 §2.2.2 的交互特徵）。
@@ -939,7 +945,7 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
     save=True 會把 cand 寫成 data/candidates/cand_<test_start>.parquet。為什麼要存檔：
     W6 要用好幾個週次的候選池訓練，而**記憶體裡的東西沒有身分** —— 今天用 top_n=50 算
     一份、明天用 100 算一份，事後分不出模型 A 是拿哪一份訓練的。預設不存，因為量撈中率
-    一天要跑好幾次，每次都寫 43 MB 沒意義。
+    一天要跑好幾次，每次都寫 39 MB 沒意義。
     """
     eval_customers(con, test_start, test_end)
     repurchase(con, test_start)
@@ -968,7 +974,6 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
         f"max(from_{nm}) AS from_{nm}, max(score_{nm}) AS score_{nm}, min(rank_{nm}) AS rank_{nm}"
         for nm in names)
     n_sources = " + ".join(f"from_{nm}" for nm in names)
-    best_rank = ", ".join(f"rank_{nm}" for nm in names)
     con.execute(f"""
         CREATE OR REPLACE TABLE cand AS
         WITH merged AS (
@@ -976,14 +981,14 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
             FROM ({" UNION ALL ".join(parts)})
             GROUP BY 1, 2
         )
-        SELECT *, ({n_sources}) AS n_sources, least({best_rank}) AS best_rank
+        SELECT *, ({n_sources}) AS n_sources
         FROM merged
     """)
     if save:
         dataset.CAND_DIR.mkdir(parents=True, exist_ok=True)
         f = dataset.CAND_DIR / f"cand_{test_start}.parquet"
-        # 先排序再存：同一位顧客的列連在一起，Parquet 才壓得動。不排序是 478 MB，排序後
-        # 是 43 MB（驗證週實測，內容逐欄相同）。
+        # 先排序再存：同一位顧客的列連在一起，Parquet 才壓得動。不排序是 465 MB，排序後
+        # 是 39 MB（驗證週實測，內容逐欄相同）。
         con.execute(f"COPY (SELECT * FROM cand ORDER BY customer_id, article_id) "
                     f"TO '{f}' (FORMAT PARQUET, COMPRESSION ZSTD)")
 
