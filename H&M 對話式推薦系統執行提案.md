@@ -158,7 +158,7 @@ tags: [proposal, recsys, conversational-recommender, LLM, H&M, agentic-rag]
 | `article_profile`      | 商品屬性 + 近 1 / 4 / 12 週銷量、不重複購買人數、近似價格（×590）、品牌線內價格百分位、購買者年齡分布、通路比例、類別內排名 | DuckDB SQL                       |
 | `article_embedding`    | 以「名稱 + 類型 + 色系 + 部門 + 文字描述」組成的文字向量                                      | sentence-transformers → ChromaDB |
 | `customer_profile`     | RFM（最近一次、頻率、金額）、偏好品牌線 / 部門 / 色系分布、慣用價格帶、年齡層                             | DuckDB SQL                       |
-| `item_item_similarity` | 共同購買相似度與 implicit ALS 隱因子相似度；ALS 同時保留顧客隱因子向量，供 W5 比較兩種召回用法                                            | Python `implicit`                |
+| `item_item_similarity` | 共同購買相似度與 implicit ALS 隱因子相似度；ALS 同時保留顧客隱因子向量，供 W5 比較兩種召回用法              | Python `implicit`                |
 | `synthetic_dialogues`  | 300 組由真實購買紀錄反推的模擬對話（見 2.2.4）                                            | LLM 使用者模擬器                       |
 
 #### 2.1.4 資料來源探索與擴充規劃
