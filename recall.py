@@ -5,7 +5,10 @@
 
 從 105,542 件商品裡，幫每位顧客挑出約 190 件「有機會」的，交給第二階段的排序模型
 （ranking.py，W6）決定最後推哪 12 件。四個召回源各建一張 cand_<名字> 表，
-欄位一律是 (customer_id, article_id)，最後由 build() 合成一張 cand。
+欄位是 (customer_id, article_id, score, rk)，最後由 build() 合成一張 cand，
+每一源保留旗標、分數、名次三欄（排序模型要用的資訊比「有沒有撈到」多）。
+（als_similar() 建的 cand_als_sim 只用來比較 ALS 的兩種用法，不進 cand，所以沒有
+score 與 rk。）
 
     回購         他近 12 週買過什麼            repurchase()
     分群熱門     跟他同群的人最近在買什麼      segment_popular()   ← 主力，佔池子九成
@@ -468,24 +471,41 @@ def repurchase(con: duckdb.DuckDBPyConnection, train_end: str,
     expand_colours=True 會把「同款的其他顏色」也納入（同一個 product_code 底下的
     各種顏色）。**預設關閉**，理由見上面 EXPAND_COLOURS 的註解。
 
+    表的欄位是 (customer_id, article_id, score, rk)，一個 (顧客, 商品) 一列：
+
+        score  他在窗口內有幾天買過它。算「天」不算「筆」，因為同一天重複列的
+               交易（約 9.4%）不是回購
+        rk     名次，1 是最近買的；同一天買的看 score，再看 article_id 決勝
+
+    名次看「最近」、分數看「買幾次」，是兩個不同的訊號，排序模型兩個都能拿來用。
+
     只讀 train_end 以前的交易。往後看一天都是拿答案當特徵。
     """
     start = dataset.pop_start_for(train_end, weeks * 7)
     source = (
-        """SELECT DISTINCT t.customer_id, a2.article_id
+        """SELECT t.customer_id, a2.article_id, t.t_dat
            FROM tx t
            JOIN eval_cus USING (customer_id)
            JOIN art_c a1 ON a1.article_id = t.article_id
            JOIN art_c a2 ON a2.product_code = a1.product_code"""
         if expand_colours else
-        """SELECT DISTINCT t.customer_id, t.article_id
+        """SELECT t.customer_id, t.article_id, t.t_dat
            FROM tx t
            JOIN eval_cus USING (customer_id)"""
     )
     con.execute(f"""
         CREATE OR REPLACE TABLE cand_repurchase AS
-        {source}
-        WHERE t.t_dat >= '{start}' AND t.t_dat < '{train_end}'
+        WITH bought AS (
+            SELECT customer_id, article_id,
+                   count(DISTINCT t_dat) AS n_days, max(t_dat) AS last_bought
+            FROM ({source}
+                  WHERE t.t_dat >= '{start}' AND t.t_dat < '{train_end}')
+            GROUP BY 1, 2
+        )
+        SELECT customer_id, article_id, n_days::DOUBLE AS score,
+               row_number() OVER (PARTITION BY customer_id
+                                  ORDER BY last_bought DESC, n_days DESC, article_id) AS rk
+        FROM bought
     """)
     return con.execute("SELECT count(*) FROM cand_repurchase").fetchone()[0]
 
@@ -553,6 +573,15 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
     dataset.build_segments 產出的那份標籤（所以 days 吃 SEGMENT_DAYS 而不是
     dataset.POP_DAYS，理由見 SEGMENT_DAYS 的註解）。
 
+    表的欄位是 (customer_id, article_id, score, rk)：score 是它佔那一群在窗口內
+    總銷量的比例，rk 是它在那份榜上的名次（1 是賣最多的）。同一位顧客只會落在一階，
+    所以名次是那一階那份榜上的名次。
+
+    score 用比例而不用件數：各群大小差很多（驗證週各群第 1 名從 2 件到 535 件），
+    用件數的話，大群的第 170 名會比小群的第 1 名分數高，排序模型學到的會是「這群
+    有多大」而不是「這件在群裡多熱門」。比例的代價是小群的比例比較不穩（2 件裡
+    賣 1 件就是 50%），群的大小交給 W6 的顧客特徵去表達。
+
     排序固定加 article_id 決勝，否則同票時每次跑出來的前 top_n 名會不一樣（共識 §4）。
     """
     for keys in ladder:
@@ -573,16 +602,17 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
             cols = ", ".join(keys)
             picked = ", ".join("s.%s" % c for c in keys)
             rungs.append(
-                "r%d AS (SELECT %s, article_id, row_number() OVER ("
+                "r%d AS (SELECT %s, article_id, n / sum(n) OVER (PARTITION BY %s) AS share, "
+                "row_number() OVER ("
                 "PARTITION BY %s ORDER BY n DESC, article_id) AS rk FROM ("
                 "SELECT %s, t.article_id, count(*) AS n FROM tx t "
                 "JOIN seg s USING (customer_id) "
                 "WHERE t.t_dat >= '%s' AND t.t_dat < '%s' GROUP BY ALL))"
-                % (n, cols, cols, picked, start, train_end)
+                % (n, cols, cols, cols, picked, start, train_end)
             )
         else:
             rungs.append(
-                "r%d AS (SELECT article_id, row_number() OVER ("
+                "r%d AS (SELECT article_id, n / sum(n) OVER () AS share, row_number() OVER ("
                 "ORDER BY n DESC, article_id) AS rk FROM ("
                 "SELECT article_id, count(*) AS n FROM tx "
                 "WHERE t_dat >= '%s' AND t_dat < '%s' GROUP BY 1))"
@@ -602,7 +632,8 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
     for n, keys in enumerate(ladder):
         on = " AND ".join("r.%s = w.%s" % (c, c) for c in keys) if keys else "TRUE"
         picks.append(
-            "SELECT w.customer_id, r.article_id FROM who w JOIN r%d r ON %s "
+            "SELECT w.customer_id, r.article_id, r.share::DOUBLE AS score, r.rk "
+            "FROM who w JOIN r%d r ON %s "
             "WHERE w.tier = %d AND r.rk <= %d" % (n, on, n, top_n)
         )
 
@@ -613,7 +644,8 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
             SELECT e.customer_id, %s, %s AS tier
             FROM eval_cus e JOIN seg s USING (customer_id)
         )
-        SELECT DISTINCT customer_id, article_id FROM (%s)
+        SELECT customer_id, article_id, max(score) AS score, min(rk) AS rk
+        FROM (%s) GROUP BY 1, 2
     """ % (", ".join(rungs),
            ", ".join("s.%s" % c for c in SEGMENT_UNKNOWN),
            tier,
@@ -640,6 +672,10 @@ def cooccurrence(con: duckdb.DuckDBPyConnection, train_end: str,
 
     weeks 同時決定兩件事：共購統計看多久，以及拿顧客哪一段的購買紀錄去查表。
 
+    表的欄位是 (customer_id, article_id, score, rk)：score 是「顧客買過的每一件
+    商品指向這個夥伴的共購次數」加總 —— 好幾件買過的東西都指向同一個夥伴，分數就
+    高；rk 是這位顧客的候選裡按 score 排的名次（1 最高），同分看 article_id。
+
     排序加了 j 決勝，同票時才不會每次跑出不同的夥伴清單（共識 §4）。
     """
     start = dataset.pop_start_for(train_end, weeks * 7)
@@ -664,16 +700,26 @@ def cooccurrence(con: duckdb.DuckDBPyConnection, train_end: str,
     con.execute(f"""
         CREATE OR REPLACE TABLE cand_cooc AS
         WITH top AS (
-            SELECT i, j FROM (
-                SELECT i, j, row_number() OVER (PARTITION BY i ORDER BY n DESC, j) AS rk
+            SELECT i, j, n FROM (
+                SELECT i, j, n, row_number() OVER (PARTITION BY i ORDER BY n DESC, j) AS rk
                 FROM cooc
             ) WHERE rk <= {top_n}
+        ),
+        bought AS (
+            SELECT DISTINCT t.customer_id, t.article_id
+            FROM tx t
+            JOIN eval_cus USING (customer_id)
+            WHERE t.t_dat >= '{start}' AND t.t_dat < '{train_end}'
+        ),
+        hit AS (
+            SELECT b.customer_id, top.j AS article_id, sum(top.n)::DOUBLE AS score
+            FROM bought b JOIN top ON top.i = b.article_id
+            GROUP BY 1, 2
         )
-        SELECT DISTINCT t.customer_id, top.j AS article_id
-        FROM tx t
-        JOIN eval_cus USING (customer_id)
-        JOIN top ON top.i = t.article_id
-        WHERE t.t_dat >= '{start}' AND t.t_dat < '{train_end}'
+        SELECT customer_id, article_id, score,
+               row_number() OVER (PARTITION BY customer_id
+                                  ORDER BY score DESC, article_id) AS rk
+        FROM hit
     """)
     return con.execute("SELECT count(*) FROM cand_cooc").fetchone()[0]
 
@@ -759,6 +805,10 @@ def als(con: duckdb.DuckDBPyConnection, train_end: str, top_n: int = ALS_TOP_N,
 
     共識 §2 允許推薦顧客已買過的商品，所以 filter_already_liked_items=False。
 
+    表的欄位是 (customer_id, article_id, score, rk)：score 是顧客向量與商品向量的
+    內積（模型的預測分數，**只在這一個模型內可比**，不同來源的分數不同尺度），
+    rk 是模型給這位顧客的名次（1 最高）。
+
     另一種用法見 als_similar()。兩種的比較見 ALS_SIM_TOP_N 的註解。
     """
     np, _, _, _ = _als_deps()
@@ -769,16 +819,18 @@ def als(con: duckdb.DuckDBPyConnection, train_end: str, top_n: int = ALS_TOP_N,
     users = con.execute("""
         SELECT DISTINCT i.ui FROM als_ix i JOIN eval_cus e USING (customer_id) ORDER BY 1
     """).df()["ui"].to_numpy()
-    ids, _ = model.recommend(users, mat[users], N=top_n, filter_already_liked_items=False)
+    ids, scores = model.recommend(users, mat[users], N=top_n, filter_already_liked_items=False)
 
     rec = pd.DataFrame({
         "ui": np.repeat(users, ids.shape[1]).astype("int32"),
         "ai": ids.reshape(-1).astype("int32"),
+        "score": scores.reshape(-1).astype("float64"),
+        "rk": np.tile(np.arange(1, ids.shape[1] + 1), len(users)).astype("int32"),
     })
     con.register("als_rec", rec)
     con.execute("""
         CREATE OR REPLACE TABLE cand_als AS
-        SELECT DISTINCT u.customer_id, a.article_id
+        SELECT u.customer_id, a.article_id, r.score, r.rk
         FROM als_rec r
         JOIN (SELECT DISTINCT customer_id, ui FROM als_ix) u USING (ui)
         JOIN (SELECT DISTINCT article_id, ai FROM als_ix) a USING (ai)
@@ -858,11 +910,23 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
           save: bool = False) -> int:
     """跑完所有召回源，合成最終候選池 cand。這是這個檔案的成品。
 
-    cand 一列一個 (顧客, 商品)，每一源各一個 0/1 欄位標記它有沒有撈到這件：
+    cand 一列一個 (顧客, 商品)。每一源有三個欄位，加上一個彙總欄位：
 
-        customer_id  article_id  from_repurchase from_segment from_cooc from_als
-          顧客A      0751471001         1             0          0        0
-          顧客A      0918890002         0             1          0        1
+        from_<源>    0/1，這一源有沒有撈到這件
+        score_<源>   這一源給它的分數；沒撈到是空值（不是 0）
+        rank_<源>    這一源給這位顧客的名次，1 最好；沒撈到是空值
+        n_sources    幾個源撈到它（0/1 旗標加總）
+
+        customer_id  article_id  from_repurchase score_repurchase rank_repurchase  ...
+          顧客A      0751471001         1               3.0              1          ...
+          顧客A      0918890002         0              空值            空值          ...
+
+    **各源的 score 是不同的尺，不能互相比大小**：回購是買過的天數、分群是佔那一群
+    銷量的比例、共購是共購次數加總、ALS 是向量內積。放進同一個模型當特徵沒問題
+    （樹模型只看各欄自己的切分），但不能把四個分數加起來當一個總分。名次也只在
+    各源自己的名單裡有意義：回購的第 1 名是「最近買的」，分群的第 1 名是「那一群
+    賣最多的」。所以**不要做跨源的名次彙總**（例如取四源名次的最小值）—— 把意思
+    不同的 1 拿來比，得到的數字說不出是什麼意思。
 
     同一件被多源撈到不是重複，是訊號 —— 好幾個不同的理由都指向它。所以這裡不能只做
     UNION 去重，要把來源留下來：排序模型會拿它當特徵（提案 §2.2.2 的交互特徵）。
@@ -881,7 +945,7 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
     save=True 會把 cand 寫成 data/candidates/cand_<test_start>.parquet。為什麼要存檔：
     W6 要用好幾個週次的候選池訓練，而**記憶體裡的東西沒有身分** —— 今天用 top_n=50 算
     一份、明天用 100 算一份，事後分不出模型 A 是拿哪一份訓練的。預設不存，因為量撈中率
-    一天要跑好幾次，每次都寫 176 MB 沒意義。
+    一天要跑好幾次，每次都寫 39 MB 沒意義。
     """
     eval_customers(con, test_start, test_end)
     repurchase(con, test_start)
@@ -889,24 +953,43 @@ def build(con: duckdb.DuckDBPyConnection, test_start: str, test_end: str,
     cooccurrence(con, test_start)
     als(con, test_start)
 
-    # 每一源先貼上自己的旗標，再用 GROUP BY 把同一個 (顧客, 商品) 併成一列。
+    # 每一源先貼上自己的旗標、分數、名次，其他源的欄位填空值，再用 GROUP BY 把同一個
+    # (顧客, 商品) 併成一列。沒撈到這件的源，旗標是 0、分數與名次是空值（不是 0 ——
+    # 0 分和「沒有分數」是兩回事，LightGBM 會把空值當成獨立的一類處理）。
     # 內層用 UNION ALL 而不是 UNION：反正外層要 GROUP BY，UNION 會多做一次無用的去重。
-    cols = list(SOURCES.values())
-    parts = [
-        "SELECT customer_id, article_id, "
-        + ", ".join(f"{1 if c == flag else 0} AS {c}" for c in cols)
-        + f" FROM {table}"
-        for table, flag in SOURCES.items()
-    ]
+    names = [flag.removeprefix("from_") for flag in SOURCES.values()]
+    parts = []
+    for table, flag in SOURCES.items():
+        mine = flag.removeprefix("from_")
+        cols = []
+        for nm in names:
+            if nm == mine:
+                cols += [f"1 AS from_{nm}", f"score AS score_{nm}", f"rk AS rank_{nm}"]
+            else:
+                cols += [f"0 AS from_{nm}", f"CAST(NULL AS DOUBLE) AS score_{nm}",
+                         f"CAST(NULL AS BIGINT) AS rank_{nm}"]
+        parts.append(f"SELECT customer_id, article_id, {', '.join(cols)} FROM {table}")
+
+    merged = ", ".join(
+        f"max(from_{nm}) AS from_{nm}, max(score_{nm}) AS score_{nm}, min(rank_{nm}) AS rank_{nm}"
+        for nm in names)
+    n_sources = " + ".join(f"from_{nm}" for nm in names)
     con.execute(f"""
         CREATE OR REPLACE TABLE cand AS
-        SELECT customer_id, article_id, {", ".join(f"max({c}) AS {c}" for c in cols)}
-        FROM ({" UNION ALL ".join(parts)})
-        GROUP BY 1, 2
+        WITH merged AS (
+            SELECT customer_id, article_id, {merged}
+            FROM ({" UNION ALL ".join(parts)})
+            GROUP BY 1, 2
+        )
+        SELECT *, ({n_sources}) AS n_sources
+        FROM merged
     """)
     if save:
         dataset.CAND_DIR.mkdir(parents=True, exist_ok=True)
         f = dataset.CAND_DIR / f"cand_{test_start}.parquet"
-        con.execute(f"COPY cand TO '{f}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+        # 先排序再存：同一位顧客的列連在一起，Parquet 才壓得動。不排序是 465 MB，排序後
+        # 是 39 MB（驗證週實測，內容逐欄相同）。
+        con.execute(f"COPY (SELECT * FROM cand ORDER BY customer_id, article_id) "
+                    f"TO '{f}' (FORMAT PARQUET, COMPRESSION ZSTD)")
 
     return con.execute("SELECT count(*) FROM cand").fetchone()[0]
