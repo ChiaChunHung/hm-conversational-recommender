@@ -66,6 +66,8 @@ python main.py build
 | `prepare.py` | CSV → Parquet 轉檔 |
 | `evaluate.py` | 評估層：MAP@12 打分、答案卷、召回撈中率、B0 / B1 基準線 |
 | `recall.py` | 第一階段候選召回：回購、分群熱門、共購、ALS 四源 + 候選池組裝 |
+| `recall_cv.py` | 召回參數的四折 cross-validation（採用規則）與各源名額的 recall–budget 曲線 |
+| `recall_checks.py` | 召回的自動檢查：資料洩漏測試、ALS 可重現性 |
 | `eda.ipynb` | 資料探索：推導建模共識（附錄 A 統計、缺失值規格、基準線） |
 
 `evaluate.py` 與 `recall.py` 目前只供 import，沒有在 `main.py` 的 `COMMANDS`
