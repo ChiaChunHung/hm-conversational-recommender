@@ -654,7 +654,8 @@ def segment_popular(con: duckdb.DuckDBPyConnection, train_end: str,
 
 
 def cooccurrence(con: duckdb.DuckDBPyConnection, train_end: str,
-                 top_n: int = COOC_TOP_N, weeks: int = COOC_WEEKS) -> int:
+                 top_n: int = COOC_TOP_N, weeks: int = COOC_WEEKS,
+                 basket_days: int = 1) -> int:
     """建 cand_cooc：顧客買過的每件商品，帶出最常跟它一起被買的 top_n 件。
 
     「一起被買」的定義是**同一位顧客、同一天**算一籃 —— 資料裡沒有籃子編號，日期是
@@ -672,6 +673,9 @@ def cooccurrence(con: duckdb.DuckDBPyConnection, train_end: str,
 
     weeks 同時決定兩件事：共購統計看多久，以及拿顧客哪一段的購買紀錄去查表。
 
+    basket_days 是「一籃」的定義：1 是同一天（預設，即上面的定義）；N > 1 是同一位
+    顧客 N 天內買的東西都算一起買。只給 recall_cv.py 比較設計用，預設輸出不變。
+
     表的欄位是 (customer_id, article_id, score, rk)：score 是「顧客買過的每一件
     商品指向這個夥伴的共購次數」加總 —— 好幾件買過的東西都指向同一個夥伴，分數就
     高；rk 是這位顧客的候選裡按 score 排的名次（1 最高），同分看 article_id。
@@ -683,6 +687,9 @@ def cooccurrence(con: duckdb.DuckDBPyConnection, train_end: str,
     # 先算商品對商品的共購次數。雙向存（i→j 和 j→i 各一列），查表時才不用管方向。
     # 時鐘撥到驗證週、近 4 週是 309 萬列（近 12 週時是 1,131 萬 —— 這個數字跟著
     # 時鐘和窗口走）；先用 sum(n*(n-1)/2) 估過才建，沒有盲目展開。
+    pair_on = ("USING (customer_id, t_dat)" if basket_days == 1 else
+               f"ON a.customer_id = b.customer_id "
+               f"AND abs(date_diff('day', a.t_dat, b.t_dat)) < {int(basket_days)}")
     con.execute(f"""
         CREATE OR REPLACE TABLE cooc AS
         WITH basket AS (
@@ -690,7 +697,7 @@ def cooccurrence(con: duckdb.DuckDBPyConnection, train_end: str,
             WHERE t_dat >= '{start}' AND t_dat < '{train_end}'
         )
         SELECT a.article_id AS i, b.article_id AS j, count(*) AS n
-        FROM basket a JOIN basket b USING (customer_id, t_dat)
+        FROM basket a JOIN basket b {pair_on}
         WHERE a.article_id <> b.article_id
         GROUP BY 1, 2
     """)
@@ -739,7 +746,8 @@ def _als_deps():
 
 
 def _als_fit(con: duckdb.DuckDBPyConnection, train_end: str,
-             weeks: int, factors: int, seed: int):
+             weeks: int, factors: int, seed: int,
+             regularization: float = 0.01, bm25_k1: float = 100, bm25_b: float = 0.8):
     """建 als_ix（字串 ID ↔ 整數索引）、訓練 ALS，回傳 (model, mat)。
 
     **兩種用法共用這一段**，因為它們只差在用哪一邊的隱因子：
@@ -752,6 +760,9 @@ def _als_fit(con: duckdb.DuckDBPyConnection, train_end: str,
 
     記憶體：只把整數索引拉進 Python，字串 ID 留在 DuckDB 最後再 join 回來。
     近 6 週的稀疏矩陣約 11 MB（149 萬個非零值）。
+
+    regularization / bm25_k1 / bm25_b 的預設值就是原本寫死的設定（regularization 是
+    implicit 的預設），開成參數只給 recall_cv.py 比較用。
     """
     np, sp, AlternatingLeastSquares, bm25_weight = _als_deps()
     start = dataset.pop_start_for(train_end, weeks * 7)
@@ -783,16 +794,18 @@ def _als_fit(con: duckdb.DuckDBPyConnection, train_end: str,
     # BM25 加權。不加權的話，買很多的人和熱門商品會主導整個矩陣，
     # 學出來的因子等於在記熱銷榜 —— 而那件事分群熱門已經做了，重疊會更嚴重。
     # 驗證週實測：不加權單獨 2.6%，加了 3.8%。
-    mat = bm25_weight(mat, K1=100, B=0.8).tocsr()
+    mat = bm25_weight(mat, K1=bm25_k1, B=bm25_b).tocsr()
 
-    model = AlternatingLeastSquares(factors=factors, random_state=seed)
+    model = AlternatingLeastSquares(factors=factors, regularization=regularization,
+                                    random_state=seed)
     model.fit(mat, show_progress=False)
     return model, mat
 
 
 def als(con: duckdb.DuckDBPyConnection, train_end: str, top_n: int = ALS_TOP_N,
         weeks: int = ALS_WEEKS, factors: int = ALS_FACTORS, seed: int = 42,
-        model_mat=None) -> int:
+        model_mat=None, regularization: float = 0.01, bm25_k1: float = 100,
+        bm25_b: float = 0.8) -> int:
     """建 cand_als：**ALS 的第二種用法** —— 用顧客隱因子對全商品打分，每人取 top_n 件。
 
     問的是「這個人會喜歡什麼」：拿他的 64 維向量去跟所有商品向量相乘，取分數最高的
@@ -812,7 +825,8 @@ def als(con: duckdb.DuckDBPyConnection, train_end: str, top_n: int = ALS_TOP_N,
     另一種用法見 als_similar()。兩種的比較見 ALS_SIM_TOP_N 的註解。
     """
     np, _, _, _ = _als_deps()
-    model, mat = model_mat if model_mat else _als_fit(con, train_end, weeks, factors, seed)
+    model, mat = model_mat if model_mat else _als_fit(con, train_end, weeks, factors, seed,
+                                                      regularization, bm25_k1, bm25_b)
 
     # 只對要評估的顧客做推薦。他們之中有人在這段窗口沒有互動（新客），
     # ALS 給不出東西，那些人靠其他源補。
