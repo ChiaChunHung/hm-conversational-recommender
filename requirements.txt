@@ -1,7 +1,10 @@
+catboost==1.2.10
 duckdb==1.5.5
 implicit==0.7.3
 ipykernel==7.3.0
+lightgbm==4.7.0
 matplotlib==3.11.2
 numpy==2.5.3
 pandas==3.0.6
 scipy==1.18.1
+xgboost==3.4.1

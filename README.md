@@ -8,6 +8,7 @@
 - Python 3.10 以上
 - 套件：`duckdb`、`pandas`、`numpy`、`scipy`、`implicit`、`matplotlib`、`ipykernel`（見 `requirements.txt`）
 - `implicit` 是召回階段的 ALS 用的，只有 `recall.als()` 會 import 它
+- `lightgbm`、`xgboost`、`catboost` 是排序比較（`ranking_compare.py`）用的；macOS 上 LightGBM 需要先 `brew install libomp`
 
 裝在虛擬環境裡，不要裝到全域 Python：
 
@@ -68,6 +69,7 @@ python main.py build
 | `recall.py` | 第一階段候選召回：回購、分群熱門、共購、ALS 四源 + 候選池組裝 |
 | `recall_cv.py` | 召回參數的四折 cross-validation（採用規則）與各源名額的 recall–budget 曲線 |
 | `recall_checks.py` | 召回的自動檢查：資料洩漏測試、ALS 可重現性 |
+| `ranking_compare.py` | 第二階段排序比較：LightGBM / XGBoost / CatBoost + 名次融合，四週滾動驗證；特徵、採用規則與結果見檔頭 |
 | `eda.ipynb` | 資料探索：推導建模共識（附錄 A 統計、缺失值規格、基準線） |
 
 `evaluate.py` 與 `recall.py` 目前只供 import，沒有在 `main.py` 的 `COMMANDS`
