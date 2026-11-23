@@ -1,16 +1,37 @@
 """
 排序模型的滾動驗證比較：LightGBM / XGBoost / CatBoost，外加名次融合。
 
-    python ranking_compare.py
+    python ranking_compare.py               三個模型 + 名次融合 + 只按分群名次，四輪
+    python ranking_compare.py features      XGBoost：NEW_FEATURES 逐一加入的比較
+    python ranking_compare.py tune          XGBoost：幾組參數與預設的比較
+    python ranking_compare.py holdout       最終設定在保留週 09-16 跑一次（09-09 訓練）
 
-每一輪用一週的候選池訓練、下一週評估 MAP@12（ROUNDS 四輪，測試週與 Stage 1 的四個驗證週相同）。候選池要先用
-recall.build(..., save=True) 產生 data/candidates/cand_<週>.parquet。
+【驗證】每一輪用一週的候選池訓練、下一週評估 MAP@12。ROUNDS 四輪，測試週與 Stage 1
+recall_cv.py 的四個驗證週相同。候選池要先用 recall.build(..., save=True) 產生
+data/candidates/cand_<週>.parquet（訓練週 08-12 也要）。保留週 09-16 不在 ROUNDS 裡，
+最終設定定案後才跑一次。
 
-特徵：候選池的 13 欄來源訊號（from_ / score_ / rank_ 各源 + n_sources），加上
-商品近 7 天銷量、顧客距上次購買天數、顧客年齡。全部只用該週開始以前的資料。
+訓練資料保留全部正例與 NEG_FRAC 的負例，並去掉沒有任何正例的顧客（排序模型在這種
+群組裡學不到東西）。評估用該週全部候選，不抽樣。
 
-訓練資料保留全部正例與 NEG_FRAC 的負例，並去掉沒有任何正例的顧客（排序模型
-在這種群組裡學不到東西）。評估用該週全部候選，不抽樣。
+【特徵】28 個，全部只用該週開始以前的交易：
+    候選池的 13 欄    from_ / score_ / rank_ 四源 + n_sources
+    商品              近 7 / 28 天銷量、近 7 天買家數、趨勢（近 7 天 ÷ 前 7 天）、
+                      近 28 天均價、上架天數、product_group、index_group
+    顧客              年齡、距上次購買天數
+    顧客 × 商品       這位顧客的購買裡同 product_type / 顏色 / department 的比例、
+                      商品均價 ÷ 顧客平均價、距上次買這件的天數
+
+【採用規則】沿用 Stage 1：paired per-customer 比較，平均 Δ ≥ MIN_EFFECT、
+至少 MIN_POSITIVE_ROUNDS 輪為正、合併 95% CI 下界 > 0。NEW_FEATURES 三個與 tune
+的五組參數都沒過（Δ 都在 +0.0002 以內），所以預設不用。
+
+【名次融合】三個模型各自在每位顧客的候選裡排名次，名次直接相加（等權），和越小越前。
+用名次不用分數，是因為三個模型的分數尺度不同。
+
+【結果】MAP@12（四輪平均 / 保留週 09-16）：
+    LightGBM 0.0294 / 0.0324   XGBoost 0.0296 / 0.0324   CatBoost 0.0293 / 0.0321
+    名次融合 0.0298 / 0.0327   只按分群名次 0.0093 / 0.0107
 """
 
 from __future__ import annotations
@@ -25,9 +46,14 @@ import evaluate
 
 ROUNDS = [("2020-08-12", "2020-08-19"), ("2020-08-19", "2020-08-26"), ("2020-08-26", "2020-09-02"),
           ("2020-09-02", "2020-09-09")]
+HOLDOUT = ("2020-09-09", "2020-09-16")
 NEG_FRAC = 0.1
 SEED = 0
-LAST_MODEL: list = []
+NEW_FEATURES = [  # 測過、未採用
+    "times_bought_item", "last_buy_same_department", "last_buy_same_type"]
+CACHE_DIR = dataset.DATA_DIR / "ranking_cache"
+MIN_EFFECT = 0.001          # MAP@12 平均提升至少 0.001，與 Stage 1 同一套規則
+MIN_POSITIVE_ROUNDS = 3
 
 
 def frame(con, t: str) -> pd.DataFrame:
@@ -106,12 +132,6 @@ def frame(con, t: str) -> pd.DataFrame:
     """).df()
 
 
-NEW_FEATURES = ["times_bought_item", "last_buy_same_department", "last_buy_same_type"]
-CACHE_DIR = dataset.DATA_DIR / "ranking_cache"
-MIN_EFFECT = 0.001          # MAP@12 平均提升至少 0.001，與 Stage 1 同一套規則
-MIN_POSITIVE_ROUNDS = 3
-
-
 def cached_frame(con, t: str) -> pd.DataFrame:
     """frame() 的結果存成 parquet，重複實驗不必重算特徵。改了 frame() 要刪掉 CACHE_DIR。"""
     CACHE_DIR.mkdir(exist_ok=True)
@@ -143,12 +163,11 @@ def fitters(params: dict | None = None):
     def xgb_fit(X, y, grp, qid, Xv):
         m = xgb.XGBRanker(objective="rank:ndcg", tree_method="hist", random_state=SEED, **xp)
         m.fit(X, y, qid=qid)
-        LAST_MODEL[:] = [m]
         return m.predict(Xv)
 
     def cb_fit(X, y, grp, qid, Xv):
         m = CatBoostRanker(loss_function="YetiRank", iterations=300, learning_rate=0.1,
-                           depth=6, random_seed=SEED, verbose=0, train_dir="/tmp/catboost_info")
+                           depth=6, random_seed=SEED, verbose=0, train_dir=str(CACHE_DIR / "catboost_info"))
         m.fit(Pool(X, y, group_id=qid))
         return m.predict(Xv)
 
@@ -221,11 +240,6 @@ def table(res: dict) -> None:
 
 
 def main() -> None:
-    """
-    python ranking_compare.py               三個模型 + 名次融合，四輪
-    python ranking_compare.py features      XGBoost：新特徵加不加的比較
-    python ranking_compare.py tune          XGBoost：幾組參數的比較
-    """
     import sys
     con = dataset.connect()
     mode = sys.argv[1] if len(sys.argv) > 1 else "compare"
@@ -256,8 +270,9 @@ def main() -> None:
                   f"Δ={c['mean']:+.5f} +rounds={c['positive']}/4 adopt={c['adopt']}  "
                   f"({time.time() - t:.0f}s)", flush=True)
     else:
+        rounds = [HOLDOUT] if mode == "holdout" else None
         res = run(con, models=("LightGBM", "XGBoost", "CatBoost", "RankAverage", "SegmentOrder"),
-                  drop=[*NEW_FEATURES, *sys.argv[2:]])   # 三個新特徵未通過採用規則
+                  drop=NEW_FEATURES, rounds=rounds)   # 三個新特徵未通過採用規則
         print("\nMAP@12")
         table(res)
 
